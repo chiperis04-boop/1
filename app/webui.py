@@ -100,18 +100,43 @@ def _matches() -> list[str]:
     return sorted(p.name for p in OUTPUT_DIR.iterdir() if p.is_dir())
 
 
+_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".webm", ".ts"}
+
+
+def _input_files() -> list[str]:
+    """List match videos already present on the server's input/ Volume.
+
+    Lets you upload a big match out-of-band (``modal volume put fhs-input
+    "match.mp4"``) instead of through the browser, then just pick it here.
+    Best-effort reloads the Modal Volume so files added while the container is
+    warm show up on refresh; a no-op outside Modal."""
+    try:
+        import modal
+        modal.Volume.from_name("fhs-input").reload()
+    except Exception:
+        pass
+    if not INPUT_DIR.exists():
+        return []
+    return sorted(p.name for p in INPUT_DIR.iterdir()
+                  if p.is_file() and p.suffix.lower() in _VIDEO_EXTS)
+
+
 # --------------------------------------------------------------------------- #
 # create / render
 # --------------------------------------------------------------------------- #
-def render_job(video_path, profile, output_mode, target_seconds, use_vision,
-               slowmo, freeze, telestration, limit, zscore, min_conf, music_vol):
+def render_job(video_path, server_pick, profile, output_mode, target_seconds,
+               use_vision, slowmo, freeze, telestration, limit, zscore,
+               min_conf, music_vol):
     """Generator: streams a log, then yields final preview state."""
     empty = (gr.update(), gr.update(), gr.update(), gr.update())
-    if not video_path:
-        yield "⚠️ Upload a match video first.", *empty
+    # a browser upload takes priority; otherwise use a file already on the server
+    chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
+    if not chosen:
+        yield ("⚠️ Upload a match video, or pick one already on the server "
+               "(input/ Volume).", *empty)
         return
 
-    src = Path(video_path)
+    src = Path(chosen)
     dst = INPUT_DIR / src.name
     if src.resolve() != dst.resolve():
         shutil.copy(src, dst)
@@ -232,6 +257,14 @@ def build() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=1):
                     video = gr.Video(label="Full match video", sources=["upload"])
+                    with gr.Row():
+                        server_pick = gr.Dropdown(
+                            _input_files(), value=None, scale=4,
+                            label="…or pick a match already on the server "
+                                  "(input/ Volume)",
+                            info="Upload big matches out-of-band: "
+                                 "modal volume put fhs-input \"match.mp4\"")
+                        refresh_inputs = gr.Button("↻", scale=1)
                     profile = gr.Dropdown(_profiles(), value="tiktok",
                                           label="Output profile")
                     output_mode = gr.Radio(
@@ -267,11 +300,13 @@ def build() -> gr.Blocks:
 
             run_btn.click(
                 render_job,
-                inputs=[video, profile, output_mode, target_seconds, use_vision,
-                        slowmo, freeze, telestration,
+                inputs=[video, server_pick, profile, output_mode, target_seconds,
+                        use_vision, slowmo, freeze, telestration,
                         limit, zscore, min_conf, music_vol],
                 outputs=[logbox, clip_dd, preview, caption, files],
             )
+            refresh_inputs.click(lambda: gr.update(choices=_input_files()),
+                                 outputs=server_pick)
             clip_dd.change(on_pick_clip, inputs=clip_dd, outputs=[preview, caption])
 
         with gr.Tab("Library"):

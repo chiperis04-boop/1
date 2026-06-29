@@ -55,10 +55,15 @@ image = (
     )
 )
 
-# Persistent storage: models downloaded once, outputs kept across runs.
+# Persistent storage: models downloaded once, inputs uploaded once, outputs kept.
 models_vol = modal.Volume.from_name("fhs-models", create_if_missing=True)
+input_vol = modal.Volume.from_name("fhs-input", create_if_missing=True)
 output_vol = modal.Volume.from_name("fhs-output", create_if_missing=True)
-VOLUMES = {f"{REMOTE}/models": models_vol, f"{REMOTE}/output": output_vol}
+VOLUMES = {
+    f"{REMOTE}/models": models_vol,
+    f"{REMOTE}/input": input_vol,     # `modal volume put fhs-input <file>` -> pick in the UI
+    f"{REMOTE}/output": output_vol,
+}
 
 # Optional Hugging Face token (for model downloads). Create it with:
 #   modal secret create huggingface-secret HF_TOKEN=hf_xxx

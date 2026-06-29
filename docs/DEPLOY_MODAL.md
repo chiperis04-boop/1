@@ -65,14 +65,23 @@ Open it — that's the same WebUI: **upload a match, pick options, Render**.
 
 ## Important Modal-specific caveats
 
-1. **Big match uploads.** Browser → web-endpoint upload is fine for small/medium
-   files, but multi-GB matches are slow and may hit request limits. For large
-   matches prefer the headless path:
+1. **Big match uploads.** Browser → web-endpoint upload works for small/medium
+   files, but multi-GB matches are slow and may hit request limits. Two better
+   options for a full match:
+
+   **(a) Upload to the server, then pick it in the UI** (recommended):
+   ```bash
+   modal volume put fhs-input "C:\Users\you\Downloads\Jordan vs Argentina.mp4"
+   ```
+   Then open the WebUI → **Create** tab → press **↻** next to *"…or pick a match
+   already on the server"* → select the file from the dropdown → **Render**.
+   The `input/` directory is a persistent `fhs-input` Volume, so the upload
+   survives cold starts and is visible to the running app.
+
+   **(b) Headless, no UI** (point at a URL):
    ```bash
    modal run modal_app.py::process --match-url "https://.../match.mp4" --mode compilation
    ```
-   or upload the file into the `fhs-output`/a data Volume first and point the
-   runner at it.
 2. **Output persistence.** Outputs are written to the `fhs-output` Volume. The
    headless `process` function calls `output_vol.commit()`. For the long-running
    WebUI, files are visible within the live container; if you need them durable
