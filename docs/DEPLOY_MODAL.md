@@ -23,12 +23,22 @@ modal token new          # opens a browser to authenticate
 modal secret create huggingface-secret HF_TOKEN=hf_your_token
 modal run modal_app.py::setup_models
 ```
-This auto-downloads **all** football models (player/goalkeeper/referee/ball, a
-dedicated ball detector, and pitch keypoints) from public Hugging Face repos and
-commits them to the `fhs-models` Volume. No Roboflow step needed. The models are
-also fetched lazily on first upload if the Volume is empty, so telestration works
-out of the box. The `huggingface-secret` is optional (repos are public) but uses
-your HF token when present.
+This downloads **every** model the pipeline needs for fully offline operation
+and commits them to the `fhs-models` Volume:
+- the football detectors (player/goalkeeper/referee/ball, a dedicated ball
+  detector, and pitch keypoints) from public Hugging Face repos,
+- the **faster-whisper** model (commentary + captions),
+- the **EasyOCR** detection/recognition weights (scoreboard),
+- a generic **yolov8x.pt** as a last-resort player-model fallback.
+
+It then prints a size manifest so you can confirm the weights actually landed
+(expect roughly ~0.8–1 GB; allow a few minutes). All caches are routed onto the
+Volume, so a cold GPU container never re-downloads them. The default caption
+font (Inter-Bold, OFL-1.1) is bundled in the image, so `drawtext` works without
+any extra setup. No Roboflow step needed. Models are also fetched lazily on
+first upload if the Volume is empty, so telestration still works out of the box.
+The `huggingface-secret` is optional (repos are public) but uses your HF token
+when present.
 
 ## 3. Run it
 

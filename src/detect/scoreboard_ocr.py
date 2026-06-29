@@ -34,9 +34,11 @@ def detect_scoreboard(proxy_path: str, cfg: dict) -> list[Signal]:
     import easyocr
 
     from ..utils.io import resolve_device
+    from ..modelhub import ocr_storage_dir
 
     reader = easyocr.Reader(
-        o["languages"], gpu=(resolve_device(cfg["vision"]["device"]) == "cuda"))
+        o["languages"], gpu=(resolve_device(cfg["vision"]["device"]) == "cuda"),
+        model_storage_directory=ocr_storage_dir(), verbose=False)
     cap = cv2.VideoCapture(proxy_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     step = int(max(1, o["sample_every_seconds"] * fps))

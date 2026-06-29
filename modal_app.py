@@ -33,9 +33,20 @@ app = modal.App(APP_NAME)
 # --------------------------------------------------------------------------- #
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "git", "libgl1", "libglib2.0-0")  # libgl* for OpenCV
+    # libgl*/glib for OpenCV; fonts-dejavu-core is a guaranteed drawtext font
+    # fallback in case the bundled Inter TTF is ever absent.
+    .apt_install("ffmpeg", "git", "libgl1", "libglib2.0-0", "fonts-dejavu-core")
     .pip_install("torch", "torchvision")
     .pip_install_from_requirements("requirements.txt")
+    # Route every lazily-loaded model cache onto the persistent models Volume
+    # (mounted at {REMOTE}/models) instead of ephemeral container storage, so a
+    # cold container never re-downloads faster-whisper / EasyOCR / ultralytics.
+    .env({
+        "HF_HOME": f"{REMOTE}/models/cache/hf",
+        "HF_HUB_CACHE": f"{REMOTE}/models/cache/hf/hub",
+        "FHS_OCR_DIR": f"{REMOTE}/models/easyocr",
+        "YOLO_CONFIG_DIR": f"{REMOTE}/models/cache/ultralytics",
+    })
     .add_local_dir(
         ".", remote_path=REMOTE,
         # don't ship local junk / things that live on Volumes instead
@@ -60,16 +71,22 @@ except TypeError:                          # older Modal SDK without `required`
 
 # --------------------------------------------------------------------------- #
 # One-time: populate the models Volume (run: modal run modal_app.py::setup_models)
+# Downloads ALL models for 100% offline operation: YOLO player/ball/pitch +
+# faster-whisper + EasyOCR + COCO fallback, then prints a size manifest so you
+# can confirm the weights actually landed on the Volume.
 # --------------------------------------------------------------------------- #
 @app.function(image=image, volumes={f"{REMOTE}/models": models_vol},
-              secrets=HF_SECRET, timeout=30 * 60)
+              secrets=HF_SECRET, timeout=60 * 60)
 def setup_models():
     import os
     import subprocess
     os.chdir(REMOTE)
-    subprocess.run(["python", "scripts/fetch_models.py"], check=False)
+    # stream child output straight to the Modal logs (check=False -> visible
+    # failures don't abort the manifest)
+    proc = subprocess.run(["python", "scripts/fetch_models.py"], check=False)
     models_vol.commit()                    # persist downloaded weights
-    print("models volume populated")
+    print(f"models volume populated (fetch_models exit={proc.returncode})")
+    return proc.returncode
 
 
 # --------------------------------------------------------------------------- #

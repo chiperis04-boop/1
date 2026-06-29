@@ -83,9 +83,12 @@ def ensure_models(cfg: dict, include_pitch: bool | None = None) -> dict:
     repo, fn = _REGISTRY["player"]
     status["player"] = _download(repo, fn, player_path)
     if not status["player"]:
-        # last-resort: generic COCO model auto-downloads via ultralytics
-        log.warning("[models] using generic yolov8x.pt as player fallback")
-        v["player_model"] = "yolov8x.pt"
+        # last-resort: prefer the prefetched COCO model on the Volume, else let
+        # ultralytics auto-download yolov8x.pt at runtime.
+        fallback = ("models/yolov8x.pt" if Path("models/yolov8x.pt").exists()
+                    else "yolov8x.pt")
+        log.warning(f"[models] using generic {fallback} as player fallback")
+        v["player_model"] = fallback
 
     # dedicated ball detector (optional but recommended)
     ball_path = v.get("ball_model")
@@ -103,6 +106,101 @@ def ensure_models(cfg: dict, include_pitch: bool | None = None) -> dict:
         repo, fn = _REGISTRY["pitch"]
         status["pitch"] = _download(repo, fn, pitch_path)
 
+    return status
+
+
+def ocr_storage_dir() -> str:
+    """Directory EasyOCR caches its detection/recognition weights in.
+
+    Defaults under models/ so on Modal it lands on the persistent Volume instead
+    of ephemeral container storage. Overridable via FHS_OCR_DIR."""
+    return os.environ.get("FHS_OCR_DIR", "models/easyocr")
+
+
+def prefetch_runtime_models(cfg: dict) -> dict:
+    """Pre-download the models that otherwise load *lazily at first render*:
+    faster-whisper (commentary + captions), EasyOCR (scoreboard), and the
+    generic COCO YOLO used as the player fallback.
+
+    Without this, the first real render on a fresh container pays a large
+    download (and re-pays it on every cold start, since those caches are
+    ephemeral). Running it in setup_models writes them to the models Volume.
+    Every step is best-effort: a failure is logged, not fatal."""
+    status: dict[str, bool] = {}
+
+    # ---- faster-whisper (Systran/faster-whisper-<size>) ----
+    model_size = cfg.get("detect", {}).get("commentary", {}).get("model_size", "small")
+    try:
+        from faster_whisper import WhisperModel
+        # device=cpu/int8 just to trigger the download into the HF cache
+        # (HF_HOME); the GPU container reloads from the same cache at runtime.
+        WhisperModel(model_size, device="cpu", compute_type="int8")
+        status["whisper"] = True
+        log.info(f"[models] faster-whisper '{model_size}' cached")
+    except Exception as exc:  # noqa: BLE001
+        status["whisper"] = False
+        log.warning(f"[models] faster-whisper '{model_size}' prefetch failed: {exc}")
+
+    # ---- EasyOCR (scoreboard) ----
+    ocr = cfg.get("detect", {}).get("scoreboard_ocr", {})
+    if ocr.get("enabled", True):
+        try:
+            import easyocr
+            langs = ocr.get("languages", ["en"])
+            store = ocr_storage_dir()
+            Path(store).mkdir(parents=True, exist_ok=True)
+            easyocr.Reader(langs, gpu=False, model_storage_directory=store,
+                           download_enabled=True, verbose=False)
+            status["easyocr"] = True
+            log.info(f"[models] EasyOCR {langs} cached -> {store}")
+        except Exception as exc:  # noqa: BLE001
+            status["easyocr"] = False
+            log.warning(f"[models] EasyOCR prefetch failed: {exc}")
+
+    # ---- generic COCO YOLO fallback (only used if the football model is down) ----
+    try:
+        from ultralytics import YOLO
+        dest = Path("models/yolov8x.pt")
+        if not (dest.exists() and dest.stat().st_size > 0):
+            m = YOLO("yolov8x.pt")                       # downloads to CWD/cache
+            ckpt = getattr(m, "ckpt_path", None) or "yolov8x.pt"
+            ckpt_p = Path(ckpt)
+            if ckpt_p.exists() and ckpt_p.resolve() != dest.resolve():
+                shutil.copy(ckpt_p, dest)
+                # don't leave the download littering the working dir
+                if ckpt_p.parent.resolve() == Path.cwd().resolve():
+                    ckpt_p.unlink(missing_ok=True)
+        status["yolov8x_fallback"] = dest.exists()
+        log.info(f"[models] COCO fallback yolov8x.pt cached -> {dest}")
+    except Exception as exc:  # noqa: BLE001
+        status["yolov8x_fallback"] = False
+        log.warning(f"[models] yolov8x fallback prefetch failed: {exc}")
+
+    return status
+
+
+def report_models(root: str = "models") -> None:
+    """Log a manifest (path + human size) of everything in the models dir, so an
+    operator can *see* that the downloads actually happened."""
+    base = Path(root)
+    if not base.exists():
+        log.warning(f"[models] directory '{root}' does not exist")
+        return
+    total = 0
+    log.info(f"[models] manifest for '{root}':")
+    for p in sorted(base.rglob("*")):
+        if p.is_file():
+            sz = p.stat().st_size
+            total += sz
+            log.info(f"[models]   {sz/1e6:8.1f} MB  {p.relative_to(base)}")
+    log.info(f"[models] total: {total/1e6:.1f} MB")
+
+
+def ensure_all_models(cfg: dict) -> dict:
+    """One call that fetches *everything* for 100% offline operation:
+    YOLO player/ball/pitch + faster-whisper + EasyOCR + COCO fallback."""
+    status = ensure_models(cfg, include_pitch=True)
+    status.update(prefetch_runtime_models(cfg))
     return status
 
 
