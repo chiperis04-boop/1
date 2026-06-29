@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Download / prepare the open-source models used by the pipeline.
 # Re-run safe: skips files that already exist.
-set -euo pipefail
+# POSIX-portable: works under bash and dash/sh (Modal may invoke either).
+set -eu
+# enable pipefail only when the shell supports it (bash/zsh); no-op under dash
+(set -o pipefail) 2>/dev/null && set -o pipefail || true
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="${BASH_SOURCE:-$0}"
+ROOT="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
 MODELS="$ROOT/models"
 mkdir -p "$MODELS"
 
