@@ -3,6 +3,16 @@
 Both are built with FFmpeg and go through `ff.run` so failures surface with the
 log tail. All outputs stay at the active profile WxH/fps with a valid audio
 track, so downstream concatenation is safe.
+
+Slow-motion quality (fixes the 03_goal.mp4 replay artefacts):
+  * **Smooth video** — the slowed segment is motion-interpolated
+    (`minterpolate`) so it generates true in-between frames instead of stuttering
+    on duplicated ones. Falls back to plain `setpts` if interpolation fails.
+  * **Clean audio** — the match audio under the slow-mo is *never* naively
+    stretched (the cause of the low-pitched robotic drone). It is time-stretched
+    with a chained, pitch-preserving `atempo` so it stays in sync with the
+    slowed video, and by default **ducked** so the music bed carries the beat.
+    Modes: ``duck`` (default) | ``mute`` | ``pitch_preserve``.
 """
 from __future__ import annotations
 
@@ -15,6 +25,25 @@ log = get_logger()
 
 _MIN_CLIP_FOR_SLOWMO = 4.0   # seconds
 _EDGE_GUARD = 0.4            # keep effects away from the very edges
+
+
+def _atempo_chain(factor: float) -> str:
+    """A pitch-preserving atempo filter chain whose product == factor.
+
+    A single `atempo` only accepts 0.5..2.0; for stronger slow-mo (e.g. 0.4) we
+    cascade stages (0.4 -> atempo=0.5,atempo=0.8) so the audio stretches to match
+    the slowed video *without* the pitch dropping into a robotic drone.
+    """
+    f = max(0.05, float(factor))
+    stages: list[float] = []
+    while f < 0.5:
+        stages.append(0.5)
+        f /= 0.5
+    while f > 2.0:
+        stages.append(2.0)
+        f /= 2.0
+    stages.append(f)
+    return ",".join(f"atempo={s:.4f}" for s in stages)
 
 
 def apply_slowmo(clip_path: str, key_t: float, out_path: str, cfg: dict) -> str:
@@ -36,29 +65,67 @@ def apply_slowmo(clip_path: str, key_t: float, out_path: str, cfg: dict) -> str:
         log.info("[effects] no room for slow-mo window; skipping")
         return clip_path
 
+    sm = e.get("slowmo", {}) if isinstance(e.get("slowmo"), dict) else {}
+    audio_mode = sm.get("audio_mode", "duck")    # duck | mute | pitch_preserve
+    duck_level = float(sm.get("duck_level", 0.15))
+    interpolate = bool(sm.get("interpolate", True))
+
     pts = 1.0 / factor
-    atempo = max(0.5, min(2.0, factor))          # atempo valid range 0.5..2.0
+    fps = int(cfg["render"]["fps"])
     encoder = ff.pick_encoder(cfg["render"]["encoder"])
 
+    # ---- video: slowed middle segment, motion-interpolated for smoothness ----
+    mid_v = f"setpts={pts:.5f}*(PTS-STARTPTS)"
+    if interpolate:
+        mid_v += (f",minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:"
+                  f"me_mode=bidir:vsbmc=1")
     vf = (
         f"[0:v]trim=0:{start:.3f},setpts=PTS-STARTPTS[v0];"
-        f"[0:v]trim={start:.3f}:{end:.3f},setpts={pts:.3f}*(PTS-STARTPTS)[v1];"
+        f"[0:v]trim={start:.3f}:{end:.3f},{mid_v}[v1];"
         f"[0:v]trim={end:.3f},setpts=PTS-STARTPTS[v2];"
         f"[v0][v1][v2]concat=n=3:v=1:a=0[v]"
     )
+
+    # ---- audio: keep duration in sync; never drop the pitch ----
+    chain = _atempo_chain(factor)
+    if audio_mode == "pitch_preserve":
+        mid_a = f"asetpts=PTS-STARTPTS,{chain}"
+    elif audio_mode == "mute":
+        mid_a = f"asetpts=PTS-STARTPTS,{chain},volume=0.0"
+    else:  # duck (default): pitch-correct + quiet so the music bed carries it
+        mid_a = f"asetpts=PTS-STARTPTS,{chain},volume={duck_level:.3f}"
     af = (
         f"[0:a]atrim=0:{start:.3f},asetpts=PTS-STARTPTS[a0];"
-        f"[0:a]atrim={start:.3f}:{end:.3f},asetpts=PTS-STARTPTS,atempo={atempo:.3f}[a1];"
+        f"[0:a]atrim={start:.3f}:{end:.3f},{mid_a}[a1];"
         f"[0:a]atrim={end:.3f},asetpts=PTS-STARTPTS[a2];"
         f"[a0][a1][a2]concat=n=3:v=0:a=1[a]"
     )
-    ff.run([
+
+    cmd = [
         "ffmpeg", "-y", "-i", clip_path,
         "-filter_complex", vf + ";" + af,
         "-map", "[v]", "-map", "[a]",
         *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k", out_path,
-    ], desc="slowmo")
-    log.info(f"[effects] slow-mo x{factor} around {key_t:.1f}s")
+    ]
+    try:
+        ff.run(cmd, desc="slowmo")
+    except ff.FFmpegError:
+        if not interpolate:
+            raise
+        # motion interpolation can fail on pathological content — degrade to a
+        # plain (still pitch-correct) slow-mo rather than failing the clip.
+        log.warning("[effects] minterpolate failed; retrying without it")
+        vf_plain = vf.replace(
+            f",minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:"
+            f"me_mode=bidir:vsbmc=1", "")
+        ff.run([
+            "ffmpeg", "-y", "-i", clip_path,
+            "-filter_complex", vf_plain + ";" + af,
+            "-map", "[v]", "-map", "[a]",
+            *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k", out_path,
+        ], desc="slowmo (no interp)")
+    log.info(f"[effects] slow-mo x{factor} around {key_t:.1f}s "
+             f"(audio={audio_mode}, interp={interpolate})")
     return out_path
 
 

@@ -24,6 +24,9 @@ class FrameDets:
     idx: int
     players: list[dict] = field(default_factory=list)   # {id, xyxy, center}
     ball: dict | None = None                            # {xyxy, center}
+    # Optional player silhouette polygons (image px) from a YOLO-seg model.
+    # Used by telestration to keep players *above* the grass-plane graphics.
+    fg_contours: list = field(default_factory=list)
 
 
 @dataclass
@@ -34,6 +37,7 @@ class TrackResult:
     frames: list[FrameDets]
     key_track_id: int | None = None
     ball_path: list[tuple[int, float, float]] = field(default_factory=list)  # (idx,x,y)
+    has_segmentation: bool = False
 
 
 def track_clip(clip_path: str, cfg: dict) -> TrackResult:
@@ -45,6 +49,16 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
     dev = resolve_device(v.get("device", "cuda"))
     model = YOLO(v["player_model"])
     ball_model = YOLO(v["ball_model"]) if v.get("ball_model") else None
+
+    # Optional segmentation pass -> player silhouettes for correct layering
+    seg_cfg = v.get("segmentation", {}) or {}
+    seg_model = None
+    if seg_cfg.get("enabled"):
+        try:
+            seg_model = YOLO(seg_cfg.get("model") or v["player_model"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[vision] segmentation model load failed: {exc}")
+            seg_model = None
 
     tracker = sv.ByteTrack()
     # Resolve class ids by NAME from the model itself so any football model works
@@ -96,6 +110,16 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
             fd.ball = {"xyxy": [float(x) for x in ball_xyxy], "center": [bx, by]}
             ball_path.append((idx, bx, by))
 
+        # optional silhouette polygons for layering graphics under players
+        if seg_model is not None:
+            try:
+                sres = seg_model.predict(frame, imgsz=v["imgsz"],
+                                         conf=v["conf_threshold"], device=dev,
+                                         verbose=False)[0]
+                fd.fg_contours = _seg_contours(sres, player_classes)
+            except Exception:  # noqa: BLE001  (never fail a frame on seg)
+                fd.fg_contours = []
+
         frames.append(fd)
         idx += 1
 
@@ -103,7 +127,8 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
     ball_path = _interpolate_ball(ball_path)
 
     result = TrackResult(width=width, height=height, fps=fps, frames=frames,
-                         ball_path=ball_path)
+                         ball_path=ball_path,
+                         has_segmentation=seg_model is not None)
     result.key_track_id = _pick_key_player(frames)
     log.info(f"[vision] tracked {idx} frames, key player id={result.key_track_id}")
     return result
@@ -138,6 +163,26 @@ def _best_ball(dets, ball_classes):
     if len(bd) == 0:
         return None
     return bd.xyxy[int(np.argmax(bd.confidence))]
+
+
+def _seg_contours(seg_res, player_classes) -> list:
+    """Extract player silhouette polygons (image-pixel Nx2 arrays) from an
+    Ultralytics segmentation result, keeping only player/keeper classes."""
+    masks = getattr(seg_res, "masks", None)
+    if masks is None or getattr(masks, "xy", None) is None:
+        return []
+    polys = masks.xy
+    boxes = getattr(seg_res, "boxes", None)
+    cls = (boxes.cls.cpu().numpy().astype(int)
+           if boxes is not None and boxes.cls is not None else None)
+    out = []
+    for i, poly in enumerate(polys):
+        if cls is not None and i < len(cls) and player_classes \
+                and int(cls[i]) not in player_classes:
+            continue
+        if poly is not None and len(poly) >= 3:
+            out.append(np.asarray(poly, dtype=np.int32))
+    return out
 
 
 def _interpolate_ball(path):

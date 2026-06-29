@@ -3,12 +3,13 @@
 Final per-clip A/V treatment before branding:
   * picks a music track (round-robin from assets/music)
   * mixes original commentary/crowd + ducked music + optional crowd-roar SFX
-  * burns word-grouped captions (TikTok style)
+  * burns word-grouped captions (TikTok style) via the Pillow HUD engine
   * applies the channel colour grade
 
-All FFmpeg calls go through `ff.run` (visible failures). Audio presence is
-checked so the audio map target always exists (fixes B4); captions are written
-to a sidecar textfile to avoid drawtext inline-escaping pitfalls (fixes M2).
+Captions are rendered with `overlay_render` (Pillow) instead of ffmpeg
+`drawtext`, so they get real typography (Inter, stroke + shadow, a soft contrast
+pill) and sit inside the safe zone. Audio is mixed + graded in one pass, then
+the caption overlays are alpha-composited on top.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from ..utils.io import get_logger
 from . import ff
+from . import overlay_render as ovr
 
 log = get_logger()
 
@@ -64,28 +66,33 @@ def compose_clip(clip_path: str, out_path: str, cfg: dict, branding: dict,
     else:
         amap = base_audio
 
-    # ---- video: grade (+ captions) ----
+    # ---- video: colour grade (captions are composited in a 2nd pass) ----
     vf = _grade_filter()
-    cap_files: list[str] = []
-    if cfg["edit"]["captions"]["enabled"] and captions:
-        cap_filter, cap_files = _caption_drawtext(captions, cfg, out_path)
-        if cap_filter:
-            vf += "," + cap_filter
     filt.append(f"[0:v]{vf}[vout]")
 
+    graded = out_path.replace(".mp4", "_graded.mp4") if (
+        cfg["edit"]["captions"]["enabled"] and captions) else out_path
     ff.run([
         "ffmpeg", "-y", *inputs,
         "-filter_complex", ";".join(filt),
         "-map", "[vout]", "-map", amap,
         *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k",
-        "-shortest", out_path,
+        "-shortest", graded,
     ], desc="compose")
 
-    for f in cap_files:
+    # ---- captions: Pillow overlays composited over the graded clip ----
+    if cfg["edit"]["captions"]["enabled"] and captions:
+        overlays, pngs = _caption_overlays(captions, cfg, branding, out_path)
+        if overlays:
+            ovr.composite(graded, overlays, out_path, encoder)
+        else:
+            Path(graded).replace(out_path)
+        ovr.cleanup(pngs)
         try:
-            Path(f).unlink()
+            Path(graded).unlink()
         except OSError:
             pass
+
     log.info(f"[compose] music+grade+captions -> {Path(out_path).name}")
     return out_path
 
@@ -109,28 +116,24 @@ def _grade_filter() -> str:
     return "eq=contrast=1.06:saturation=1.12:gamma=0.98,curves=preset=lighter"
 
 
-def _caption_drawtext(captions: list[dict], cfg: dict, out_path: str):
-    """Return (filter_string, [sidecar_files]).
-
-    Each caption line is written to its own UTF-8 textfile and referenced via
-    drawtext `textfile=`, which avoids fragile inline escaping of punctuation.
-    """
-    font = cfg["edit"]["captions"]["font"]
-    fontsize = cfg["edit"]["captions"].get("fontsize", 58)
-    parts, files = [], []
+def _caption_overlays(captions: list[dict], cfg: dict, branding: dict,
+                      out_path: str):
+    """Render each caption line to a full-frame RGBA PNG (Pillow) and return
+    (overlays, png_paths) for alpha compositing."""
+    w = cfg["_active_profile"]["width"]
+    h = cfg["_active_profile"]["height"]
+    font = (cfg["edit"]["captions"].get("font")
+            or branding.get("channel", {}).get("font", ""))
+    zones = ovr.zones_from_cfg(cfg)
+    overlays, pngs = [], []
     for i, c in enumerate(captions):
         text = (c.get("text") or "").strip()
         if not text:
             continue
-        tf = out_path.replace(".mp4", f"_cap{i:03d}.txt")
-        Path(tf).write_text(text, encoding="utf-8")
-        files.append(tf)
-        start, end = float(c["start"]), float(c["end"])
-        fontclause = f"fontfile={font}:" if font and Path(font).exists() else ""
-        parts.append(
-            f"drawtext={fontclause}textfile={tf}:expansion=none:"
-            f"fontcolor=white:fontsize={fontsize}:borderw=4:bordercolor=black:"
-            f"x=(w-text_w)/2:y=h*0.72:"
-            f"enable='between(t,{start:.2f},{end:.2f})'"
-        )
-    return (",".join(parts), files) if parts else ("", [])
+        png = out_path.replace(".mp4", f"_cap{i:03d}.png")
+        ov = ovr.caption_overlay(text, w, h, font, png, zones,
+                                 start=float(c["start"]), end=float(c["end"]))
+        if ov:
+            overlays.append(ov)
+            pngs.append(png)
+    return overlays, pngs
