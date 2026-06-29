@@ -21,13 +21,21 @@ def detect_commentary(audio_path: str, cfg: dict) -> list[Signal]:
     if not c.get("enabled", True) or not audio_path:
         return []
 
-    from faster_whisper import WhisperModel
+    from ..utils.io import resolve_device
 
-    device = cfg["vision"]["device"]
-    compute = "float16" if device == "cuda" else "int8"
-    model = WhisperModel(c["model_size"], device=device, compute_type=compute)
+    try:
+        from faster_whisper import WhisperModel
 
-    segments, _ = model.transcribe(audio_path, vad_filter=True)
+        device = resolve_device(cfg["vision"]["device"])
+        compute = "float16" if device == "cuda" else "int8"
+        model = WhisperModel(c["model_size"], device=device, compute_type=compute)
+
+        segments, _ = model.transcribe(audio_path, vad_filter=True)
+    except Exception as exc:  # noqa: BLE001
+        # commentary is one of several signal sources; never let it abort the
+        # whole detection pass.
+        log.warning(f"[commentary] unavailable ({exc}); skipping this signal")
+        return []
 
     keymap = c["keywords"]
     signals: list[Signal] = []

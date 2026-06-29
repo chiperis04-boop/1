@@ -33,7 +33,10 @@ def detect_scoreboard(proxy_path: str, cfg: dict) -> list[Signal]:
     import cv2
     import easyocr
 
-    reader = easyocr.Reader(o["languages"], gpu=(cfg["vision"]["device"] == "cuda"))
+    from ..utils.io import resolve_device
+
+    reader = easyocr.Reader(
+        o["languages"], gpu=(resolve_device(cfg["vision"]["device"]) == "cuda"))
     cap = cv2.VideoCapture(proxy_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     step = int(max(1, o["sample_every_seconds"] * fps))

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..utils.io import get_logger
+from ..utils.io import get_logger, resolve_device
 
 log = get_logger()
 
@@ -117,7 +117,7 @@ class PitchEstimator:
             return calib
 
         cap = cv2.VideoCapture(clip_path)
-        device = self.cfg["vision"].get("device", "cpu")
+        device = resolve_device(self.cfg["vision"].get("device", "cpu"))
         idx = 0
         last_H = None
         smooth = float(self.cfg["vision"].get("pitch", {}).get("smoothing", 0.8))

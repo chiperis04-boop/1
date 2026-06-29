@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..utils.io import get_logger
+from ..utils.io import get_logger, resolve_device
 
 log = get_logger()
 
@@ -42,6 +42,7 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
     import supervision as sv
 
     v = cfg["vision"]
+    dev = resolve_device(v.get("device", "cuda"))
     model = YOLO(v["player_model"])
     ball_model = YOLO(v["ball_model"]) if v.get("ball_model") else None
 
@@ -66,7 +67,7 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
             break
 
         res = model.predict(frame, imgsz=v["imgsz"], conf=v["conf_threshold"],
-                            iou=v["iou_threshold"], device=v["device"], verbose=False)[0]
+                            iou=v["iou_threshold"], device=dev, verbose=False)[0]
         dets = sv.Detections.from_ultralytics(res)
 
         # split players vs ball
@@ -85,7 +86,7 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
         ball_xyxy = _best_ball(dets, ball_classes)
         if ball_model is not None:
             bres = ball_model.predict(frame, imgsz=v["imgsz"], conf=0.15,
-                                      device=v["device"], verbose=False)[0]
+                                      device=dev, verbose=False)[0]
             bdets = sv.Detections.from_ultralytics(bres)
             if len(bdets):
                 ball_xyxy = bdets.xyxy[int(np.argmax(bdets.confidence))]

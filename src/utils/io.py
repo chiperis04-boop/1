@@ -28,6 +28,31 @@ log = get_logger()
 
 
 # --------------------------------------------------------------------------- #
+# device resolution (graceful CPU fallback)
+# --------------------------------------------------------------------------- #
+def resolve_device(requested: str | None = "cuda") -> str:
+    """Return ``'cuda'`` only when a usable CUDA device is actually present,
+    otherwise ``'cpu'``.
+
+    Config defaults to ``device: cuda`` for the L40S target, but every model
+    backend (faster-whisper/ctranslate2, Ultralytics YOLO, EasyOCR) will *hard
+    crash* if asked for CUDA on a host without a working driver
+    (e.g. "CUDA driver version is insufficient for CUDA runtime version").
+    Routing through this helper lets the GPU stages degrade to CPU instead of
+    aborting the run, so a dry run / CPU box still produces clips."""
+    req = (requested or "cpu").lower()
+    if req != "cuda":
+        return req
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+# --------------------------------------------------------------------------- #
 # config
 # --------------------------------------------------------------------------- #
 def load_config(path: str | Path = "config/config.yaml") -> dict[str, Any]:
