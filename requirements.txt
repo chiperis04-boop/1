@@ -26,7 +26,7 @@ faster-whisper>=1.0.0
 ultralytics>=8.2.0
 supervision>=0.22.0
 scikit-learn>=1.3          # team-classification clustering (vision/teams.py)
-huggingface-hub>=0.23      # automatic model downloads (src/modelhub.py)
+huggingface-hub>=0.23,<1.0 # model downloads (src/modelhub.py); <1.0 keeps HfFolder for gradio
 
 # ---- web UI ----
 # Pinned to the 4.x line: the WebUI (app/webui.py) is written against the
