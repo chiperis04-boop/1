@@ -22,9 +22,15 @@ from src.utils.io import load_config
 
 
 def _patch_gradio_client_schema_bug() -> None:
-    """Work around a gradio_client bug (TypeError: argument of type 'bool' is
-    not iterable) where boolean JSON-schema values crash API-info generation,
-    causing GET / -> 500. Harmless no-op if the internals differ."""
+    """Defensive guard around gradio_client JSON-schema -> python-type parsing.
+
+    The *root* fix for the historical GET / -> 500 crashes is the coherent
+    version lock in requirements.txt (gradio 4.44.1 with era-matched
+    fastapi/starlette/pydantic); with those pins get_api_info() succeeds on its
+    own. This wrapper is kept only as a harmless belt-and-suspenders net: if a
+    future schema edge case feeds a bool / non-dict node into the parser it
+    degrades to "Any"/"bool" instead of raising. It is a no-op when the
+    internals already behave, so it does NOT mask the version contract."""
     try:
         import gradio_client.utils as u
     except Exception:

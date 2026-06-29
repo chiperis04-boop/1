@@ -29,10 +29,34 @@ scikit-learn>=1.3          # team-classification clustering (vision/teams.py)
 huggingface-hub>=0.23,<1.0 # model downloads (src/modelhub.py); <1.0 keeps HfFolder for gradio
 
 # ---- web UI ----
-# Pinned to the 4.x line: the WebUI (app/webui.py) is written against the
-# Gradio 4 API. Unpinned, pip resolves to 6.x which has breaking changes.
-gradio>=4.44,<5
+# IMPORTANT: this is a *coherent, internally consistent* lock of the whole web
+# stack, not a per-bug patch. The WebUI (app/webui.py) targets the Gradio 4 API.
+#
+# Why every line below is pinned (root cause of the cascading GET / crashes):
+# gradio 4.44.1 declares only `fastapi<1.0` and no cap at all on starlette /
+# pydantic. Left unpinned, pip happily resolves starlette 1.x + fastapi 0.138 +
+# pydantic 2.13 — versions released *long after* gradio 4.44.1 (Sept 2024).
+#   * starlette 1.x removed the legacy `TemplateResponse(name, context)` call
+#     order that gradio 4.44.1 still uses -> GET / raised
+#     `TypeError: unhashable type: 'dict'` (jinja2 tried to hash the context).
+#   * newer pydantic emits JSON schemas with boolean `additionalProperties`,
+#     which gradio_client 1.3.0 chokes on ("argument of type 'bool' is not
+#     iterable") while building /info.
+# Pinning fastapi/starlette/pydantic to the gradio-4.44.1-era releases fixes
+# BOTH classes of bug at the source (verified: GET / -> 200, get_api_info() OK).
+gradio==4.44.1
+gradio-client==1.3.0
+fastapi==0.115.0
+starlette==0.38.6              # last 0.x line that keeps gradio 4's TemplateResponse call
+pydantic==2.9.2               # schema shape gradio_client 1.3.0 can parse
+pydantic-core==2.23.4         # matched to pydantic 2.9.2
+orjson==3.10.7
+tomlkit==0.12.0               # exact pin required by gradio 4.44.1
+markupsafe>=2.0,<3            # gradio caps markupsafe~=2.0
+jinja2>=3.1,<4
+uvicorn>=0.23,<0.31
+websockets>=10.0,<13.0        # gradio_client 1.3.0 cap
 
 # ---- misc ----
 scipy>=1.11
-pillow>=10.0
+pillow>=10.0,<11      # gradio 4.44.1 requires pillow<11.0
