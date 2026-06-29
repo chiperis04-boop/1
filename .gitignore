@@ -1,0 +1,20 @@
+# envs
+.venv/
+__pycache__/
+*.pyc
+
+# self-bootstrapper local ffmpeg
+bin/
+
+# heavy/local artifacts
+models/*.pt
+input/*
+output/*
+assets/music/*
+assets/sfx/*
+assets/fonts/*
+assets/branding/*
+
+# keep folder structure
+!**/.gitkeep
+!assets/README.md

@@ -1,0 +1,76 @@
+# Deploying on Modal (modal.com)
+
+Modal is serverless GPU. The deploy model is different from a plain VM:
+
+| Plain VM (`studio.py`) | Modal (`modal_app.py`) |
+|---|---|
+| bootstrap venv + deps at runtime | deps baked into a container **Image** |
+| local disk for models/output | persistent **Volumes** |
+| you manage the process | Modal autoscales; pay per second of GPU |
+| `python3 studio.py` | `modal deploy modal_app.py` |
+
+So on Modal use **`modal_app.py`**, not `studio.py`.
+
+## 1. Install + auth
+```bash
+pip install modal
+modal token new          # opens a browser to authenticate
+```
+
+## 2. Populate the models Volume (one-time)
+```bash
+modal run modal_app.py::setup_models
+```
+This runs `scripts/download_models.sh` inside a container and commits the weights
+to the `fhs-models` Volume so they aren't re-downloaded on every cold start.
+For the football-specific models (player/ball/pitch), see `docs/MODELS.md` — set
+the Roboflow env vars or upload your `.pt` files into the Volume.
+
+## 3. Run it
+
+Dev (hot reload, temporary `-dev` URL):
+```bash
+modal serve modal_app.py
+```
+Production (stable URL, stays deployed):
+```bash
+modal deploy modal_app.py
+```
+Modal prints a URL like `https://<you>--football-highlight-studio-web.modal.run`.
+Open it — that's the same WebUI: **upload a match, pick options, Render**.
+
+## 4. Configuration knobs (top of `modal_app.py`)
+- `GPU` — `"T4"` (cheapest) ... `"L4"`, `"A10G"` (good default), `"A100"`, `"H100"`.
+- `timeout` on `web` — max seconds a single render may run (default 1h; raise for
+  long matches).
+- `scaledown_window` — how long to keep the GPU warm after the last request
+  (trade responsiveness vs cost).
+- `@modal.concurrent(max_inputs=...)` — concurrent UI sessions per container.
+
+## Important Modal-specific caveats
+
+1. **Big match uploads.** Browser → web-endpoint upload is fine for small/medium
+   files, but multi-GB matches are slow and may hit request limits. For large
+   matches prefer the headless path:
+   ```bash
+   modal run modal_app.py::process --match-url "https://.../match.mp4" --mode compilation
+   ```
+   or upload the file into the `fhs-output`/a data Volume first and point the
+   runner at it.
+2. **Output persistence.** Outputs are written to the `fhs-output` Volume. The
+   headless `process` function calls `output_vol.commit()`. For the long-running
+   WebUI, files are visible within the live container; if you need them durable
+   across cold starts, periodically commit the volume or download via the UI.
+3. **Cold starts.** First request after scale-to-zero pays image+model load.
+   Keeping models on a Volume (step 2) and a non-zero `scaledown_window` reduces
+   this.
+4. **`vision.device`** stays `cuda` (config default) — correct on a Modal GPU.
+   On a CPU-only Modal function set it to `cpu` and disable telestration.
+5. **Cost.** You pay per GPU-second. A 90-min match with vision on can take a
+   while; estimate before batch runs. The `--no-vision` dry run is cheap.
+
+## Not executed in this repo's sandbox
+This file + `modal_app.py` are written against the documented Modal 1.0 API but
+were **not run here** (no Modal account/GPU in the build sandbox). Validate with
+`modal serve` first; adjust decorator names if your installed Modal SDK differs
+(see https://modal.com/docs/guide/modal-1-0-migration).

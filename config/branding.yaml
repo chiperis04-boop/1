@@ -1,0 +1,58 @@
+# ============================================================
+# Your channel identity. Change these to rebrand every output.
+# ============================================================
+
+channel:
+  name: "YOUR CHANNEL"
+  handle: "@yourchannel"
+  primary_color: [0, 220, 255]     # BGR — used for arrows, lower-thirds
+  secondary_color: [20, 20, 20]
+  font: assets/fonts/Inter-Bold.ttf
+
+intro:
+  enabled: true
+  clip: assets/branding/intro.mp4   # short 0.8-1.5s sting (you provide)
+  # if no clip, a generated animated logo card is used
+  fallback_text: "YOUR CHANNEL"
+
+outro:
+  enabled: true
+  clip: assets/branding/outro.mp4
+  cta_text: "Follow for daily breakdowns"
+
+hook:
+  enabled: true
+  # one is picked per clip (round-robin or by moment type)
+  templates:
+    goal:
+      - "Spot the defender's mistake 👀"
+      - "Rate this finish 1-10 🔥"
+      - "Guess who scored 👇"
+    chance:
+      - "How did this NOT go in?? 😱"
+      - "Best save of the season?"
+    skill:
+      - "Watch the run, not the ball 🎯"
+
+lower_third:
+  enabled: true
+  show_moment_type: true             # "GOAL", "BIG CHANCE", etc.
+  show_minute: true                  # match minute if detected from OCR
+
+stats_overlay:
+  enabled: true
+  show_shot_distance: true
+  show_sprint_distance: true
+  show_top_speed: true               # requires vision.pitch (metric calibration)
+  show_players_beaten: true
+
+watermark:
+  enabled: true
+  text: "@yourchannel"
+  position: top_right
+  opacity: 0.6
+
+caption_export:
+  # social caption + hashtags written next to each clip
+  hashtags: ["#football", "#soccer", "#goal", "#highlights", "#tactics"]
+  template: "{moment_type} breakdown — {hook}\n\n{hashtags}"

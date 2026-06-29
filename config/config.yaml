@@ -1,0 +1,179 @@
+# ============================================================
+# Football Highlight Studio — main configuration
+# All tuning lives here. The code reads this file at runtime.
+# ============================================================
+
+ingest:
+  # working resolution for analysis (downscaled = faster detection).
+  # final render always uses the original source quality.
+  analysis_height: 540
+  audio_sample_rate: 16000
+  # hardware acceleration for decoding the (large) source.
+  # auto  = let ffmpeg use NVDEC/VAAPI if available, else software (safe default)
+  # none  = force software decode
+  hwaccel: auto
+  # encoder for the analysis proxy. h264_nvenc uses the GPU (L40S etc.) and
+  # auto-falls back to libx264 if NVENC is unavailable.
+  proxy_encoder: h264_nvenc
+
+detect:
+  # ---- audio energy (crowd roar + commentator excitement) ----
+  audio:
+    enabled: true
+    frame_seconds: 1.0          # analysis window
+    hop_seconds: 0.5
+    # a moment is flagged when smoothed loudness exceeds
+    # (rolling_median + zscore_threshold * rolling_std)
+    zscore_threshold: 2.2
+    smoothing_seconds: 3.0
+    min_gap_seconds: 25.0       # merge spikes closer than this
+
+  # ---- scene / replay detection ----
+  scene:
+    enabled: true
+    detector: content           # content | adaptive
+    threshold: 27.0
+    # process every Nth frame on the proxy (1 = every frame). 2-3 cuts scene
+    # detection time 2-3x on a full match with negligible impact on replay
+    # clustering accuracy.
+    frame_skip: 2
+    # replays are usually short, tightly-cut segments after a goal
+    replay_max_seconds: 12.0
+
+  # ---- scoreboard OCR (most precise goal detector) ----
+  scoreboard_ocr:
+    enabled: true
+    sample_every_seconds: 5.0   # OCR is expensive; sample sparsely
+    # region of interest as fractions of frame [x1, y1, x2, y2].
+    # null = auto-detect a stable on-screen graphic region.
+    roi: null
+    languages: ["en"]
+
+  # ---- commentary keywords (WhisperX / faster-whisper) ----
+  commentary:
+    enabled: true
+    model_size: small           # tiny|base|small|medium|large-v3
+    # excitement keywords boost a moment's score (multilingual ok)
+    keywords:
+      goal: ["goal", "scores", "what a", "gol", "golazo", "gooal", "unbelievable", "screamer"]
+      chance: ["chance", "close", "saved", "off the bar", "post", "denied"]
+      card: ["red card", "sent off", "penalty", "var", "free kick"]
+
+  # ---- action spotting (optional, highest-precision event model) ----
+  # Off by default; needs a SoccerNet-family model. See
+  # docs/ROADMAP_FOOTBALL_CV.md and src/detect/action_spotting.py.
+  action_spotting:
+    enabled: false
+    backend: oslactionspotting   # oslactionspotting | custom
+    entrypoint: null             # for backend=custom: "module:function"
+    min_conf: 0.5
+    labels_map: {}               # extra {model_label: our_kind} overrides
+
+fusion:
+  # final score = weighted sum of normalized signal strengths
+  weights:
+    action_spotting: 1.2        # a learned event model dominates when present
+    scoreboard_ocr: 1.0         # score change is near-certain
+    audio: 0.6
+    commentary: 0.5
+    scene_replay: 0.4
+  min_confidence: 0.45          # drop weak candidates
+  max_moments: 25               # cap clips per match
+  # classify moment type from which signals fired
+  types: ["goal", "chance", "save", "skill", "card"]
+
+clip:
+  pre_seconds: 7.0              # buildup before the moment
+  post_seconds: 5.0             # celebration / aftermath
+  # goals get extra buildup
+  goal_pre_seconds: 11.0
+  goal_post_seconds: 7.0
+
+vision:
+  enabled: true
+  device: cuda                  # cuda | cpu
+  player_model: models/yolov8x-football.pt   # or yolov8x.pt (generic)
+  ball_model: null              # optional dedicated ball model / TrackNet
+  conf_threshold: 0.3
+  iou_threshold: 0.5
+  imgsz: 1280
+  tracker: bytetrack            # via supervision
+  # classes of interest in the model's label space
+  classes:
+    player: [0]
+    ball: [32]                  # generic COCO 'sports ball' = 32
+  # small fast ball: sliced/tiled inference so it isn't lost at low res (SAHI)
+  ball:
+    slice_inference: false      # enable for a dedicated ball pass
+    slice: 640
+    overlap: 0.2
+
+  # ---- camera calibration: pitch keypoints -> homography (metric stats) ----
+  # See docs/ROADMAP_FOOTBALL_CV.md (L2). Needs a pitch-keypoint model.
+  pitch:
+    enabled: false
+    model: models/pitch-keypoints.pt
+    conf: 0.5
+    min_points: 4
+    sample_every_frames: 1
+    smoothing: 0.8
+
+  # ---- team classification -> possession-aware protagonist (L3) ----
+  teams:
+    enabled: false              # default HSV jersey clustering (no extra model)
+    method: hsv                 # hsv | siglip
+    n_teams: 2
+
+telestration:
+  enabled: true
+  spotlight_scorer: true        # moving glow under the key player
+  motion_arrows: true           # arrow along a tracked player's path
+  ball_trail: true              # fading trail behind the ball
+  highlight_zone: true          # shade free space / danger zone
+  freeze_callout: true          # freeze + zoom + arrow before key action
+  arrow_color: [0, 200, 255]    # BGR
+  spotlight_color: [0, 220, 255]
+  trail_color: [255, 255, 255]
+  line_thickness: 4
+
+edit:
+  reframe:
+    target_aspect: "9:16"       # 9:16 | 1:1 | 16:9
+    mode: action_track          # action_track | center | letterbox
+    smoothing: 0.85             # camera smoothing for the virtual crop
+  effects:
+    slowmo_on_key: true
+    slowmo_factor: 0.4
+    slowmo_window: 2.5
+    freeze_zoom: true
+    freeze_zoom_scale: 1.4
+  audio:
+    music_dir: assets/music
+    crowd_sfx: assets/sfx/crowd_roar.wav
+    music_db: -16.0             # music loudness target (LUFS-ish)
+    music_volume: 0.35          # linear gain applied to the music bed
+    duck_under_commentary: true
+  captions:
+    enabled: true
+    style: tiktok               # tiktok | clean | broadcast
+    font: assets/fonts/Inter-Bold.ttf
+    fontsize: 58
+    max_words_per_line: 4
+
+render:
+  encoder: h264_nvenc           # h264_nvenc | libx264
+  crf: 20                       # used for libx264; nvenc uses -cq
+  fps: 30
+  # per_clip  = one finished clip per detected moment (~15-23s each)
+  # compilation = one reel that stitches several moments to a target length
+  output_mode: per_clip         # per_clip | compilation
+  compilation:
+    target_seconds: 45          # aim for this length
+    min_seconds: 30
+    max_seconds: 60
+    per_moment_max_seconds: 12  # cap each moment's contribution
+  profiles:
+    tiktok:   { width: 1080, height: 1920, fps: 30 }
+    reels:    { width: 1080, height: 1920, fps: 30 }
+    shorts:   { width: 1080, height: 1920, fps: 30 }
+    youtube:  { width: 1920, height: 1080, fps: 30 }
