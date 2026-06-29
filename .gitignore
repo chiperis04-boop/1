@@ -7,7 +7,9 @@ __pycache__/
 bin/
 
 # heavy/local artifacts
-models/*.pt
+models/*
+!models/.gitkeep
+/yolov8x.pt
 input/*
 output/*
 assets/music/*
@@ -18,3 +20,6 @@ assets/branding/*
 # keep folder structure
 !**/.gitkeep
 !assets/README.md
+# bundled default caption/branding font (OFL-1.1) — required for drawtext
+!assets/fonts/Inter-Bold.ttf
+!assets/fonts/Inter-LICENSE.txt
