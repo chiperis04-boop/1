@@ -44,12 +44,14 @@ Modal prints a URL like `https://<you>--football-highlight-studio-web.modal.run`
 Open it — that's the same WebUI: **upload a match, pick options, Render**.
 
 ## 4. Configuration knobs (top of `modal_app.py`)
-- `GPU` — `"T4"` (cheapest) ... `"L4"`, `"A10G"` (good default), `"A100"`, `"H100"`.
-- `timeout` on `web` — max seconds a single render may run (default 1h; raise for
-  long matches).
+- `GPU` — set to **`"L40S"`** (the configured target). Other options:
+  `"T4"` (cheapest) ... `"L4"`, `"A10G"`, `"A100"`, `"H100"`.
+- `timeout` on `web` — max seconds a single render may run (set to **2h** so a
+  full 1080p match streaming progress over one request isn't killed mid-render).
 - `scaledown_window` — how long to keep the GPU warm after the last request
   (trade responsiveness vs cost).
-- `@modal.concurrent(max_inputs=...)` — concurrent UI sessions per container.
+- `@modal.concurrent(max_inputs=...)` — concurrent UI sessions per container
+  (heavy render concurrency is separately gated by Gradio's `.queue()`).
 
 ## Important Modal-specific caveats
 
