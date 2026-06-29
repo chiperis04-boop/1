@@ -46,7 +46,7 @@ BIN = ROOT / "bin"
 MARKER = VENV / ".bootstrapped"
 REPO = os.environ.get(
     "FHS_REPO",
-    "https://github.com/your-org/football-highlight-studio",
+    "https://github.com/chiperis04-boop/1",
 )
 PASSTHROUGH = {"run", "detect", "list-profiles"}
 FFMPEG_STATIC = ("https://johnvansickle.com/ffmpeg/releases/"
