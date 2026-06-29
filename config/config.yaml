@@ -89,16 +89,23 @@ clip:
   goal_pre_seconds: 11.0
   goal_post_seconds: 7.0
 
+models:
+  # Auto-download football models from public Hugging Face repos on first use
+  # (player/goalkeeper/referee/ball, dedicated ball, and pitch keypoints).
+  # Honors HF_TOKEN from the environment if set. See src/modelhub.py.
+  auto_download: true
+
 vision:
   enabled: true
   device: cuda                  # cuda | cpu
-  player_model: models/yolov8x-football.pt   # or yolov8x.pt (generic)
-  ball_model: null              # optional dedicated ball model / TrackNet
+  player_model: models/football-player.pt    # auto-downloaded (player/gk/ref/ball)
+  ball_model: models/football-ball.pt         # auto-downloaded dedicated ball model
   conf_threshold: 0.3
   iou_threshold: 0.5
   imgsz: 1280
   tracker: bytetrack            # via supervision
-  # classes of interest in the model's label space
+  # Fallback class indices ONLY — at runtime classes are resolved BY NAME from
+  # the model itself, so any football model works regardless of index order.
   classes:
     player: [0]
     ball: [32]                  # generic COCO 'sports ball' = 32
@@ -111,8 +118,8 @@ vision:
   # ---- camera calibration: pitch keypoints -> homography (metric stats) ----
   # See docs/ROADMAP_FOOTBALL_CV.md (L2). Needs a pitch-keypoint model.
   pitch:
-    enabled: false
-    model: models/pitch-keypoints.pt
+    enabled: false              # opt-in (download is automatic); see ROADMAP_FOOTBALL_CV.md
+    model: models/football-pitch.pt
     conf: 0.5
     min_points: 4
     sample_every_frames: 1
@@ -120,7 +127,7 @@ vision:
 
   # ---- team classification -> possession-aware protagonist (L3) ----
   teams:
-    enabled: false              # default HSV jersey clustering (no extra model)
+    enabled: true               # HSV jersey clustering (no extra model needed)
     method: hsv                 # hsv | siglip
     n_teams: 2
 

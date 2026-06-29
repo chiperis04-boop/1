@@ -121,6 +121,16 @@ def run_pipeline(
     cfg["_active_profile"] = cfg["render"]["profiles"][profile]
     cfg["render"]["encoder"] = ff.pick_encoder(cfg["render"]["encoder"])
 
+    # ensure the football models are present (auto-download, idempotent) so
+    # telestration works on upload with no manual setup
+    if cfg.get("vision", {}).get("enabled"):
+        try:
+            from .modelhub import ensure_models
+            emit("models", 1, "checking / downloading models")
+            ensure_models(cfg)
+        except Exception as exc:  # noqa: BLE001  (never block on model fetch)
+            log.warning(f"[models] ensure failed (will try generic): {exc}")
+
     name = Path(match).stem
     workdir = ensure_dir(Path(out_root) / name / "work")
     out_dir = ensure_dir(Path(out_root) / name)

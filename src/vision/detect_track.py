@@ -46,8 +46,11 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
     ball_model = YOLO(v["ball_model"]) if v.get("ball_model") else None
 
     tracker = sv.ByteTrack()
-    player_classes = set(v["classes"]["player"])
-    ball_classes = set(v["classes"]["ball"])
+    # Resolve class ids by NAME from the model itself so any football model works
+    # regardless of its class-index order; fall back to config indices.
+    player_classes, ball_classes = _resolve_classes(model, v.get("classes", {}))
+    log.info(f"[vision] player classes={sorted(player_classes)} "
+             f"ball classes={sorted(ball_classes)} (from {model.names})")
 
     cap = cv2.VideoCapture(clip_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -106,6 +109,27 @@ def track_clip(clip_path: str, cfg: dict) -> TrackResult:
 
 
 # --------------------------------------------------------------------------- #
+def _resolve_classes(model, cfg_classes: dict):
+    """Map a YOLO model's class names to our (player, ball) id sets.
+
+    'player' and 'goalkeeper' -> player; anything with 'ball' -> ball; referees
+    are intentionally excluded. Falls back to config indices if names are absent.
+    """
+    names = getattr(model, "names", None) or {}
+    player_ids, ball_ids = [], []
+    for i, n in names.items():
+        ln = str(n).lower()
+        if "ball" in ln:
+            ball_ids.append(int(i))
+        elif "player" in ln or "keeper" in ln:
+            player_ids.append(int(i))
+    if not player_ids:
+        player_ids = list(cfg_classes.get("player", [0]))
+    if not ball_ids:
+        ball_ids = list(cfg_classes.get("ball", [32]))
+    return set(player_ids), set(ball_ids)
+
+
 def _best_ball(dets, ball_classes):
     import numpy as np
     mask = np.isin(dets.class_id, list(ball_classes))

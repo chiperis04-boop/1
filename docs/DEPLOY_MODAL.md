@@ -19,12 +19,16 @@ modal token new          # opens a browser to authenticate
 
 ## 2. Populate the models Volume (one-time)
 ```bash
+# optional but recommended (you have an HF key): faster, no rate limits
+modal secret create huggingface-secret HF_TOKEN=hf_your_token
 modal run modal_app.py::setup_models
 ```
-This runs `scripts/download_models.sh` inside a container and commits the weights
-to the `fhs-models` Volume so they aren't re-downloaded on every cold start.
-For the football-specific models (player/ball/pitch), see `docs/MODELS.md` — set
-the Roboflow env vars or upload your `.pt` files into the Volume.
+This auto-downloads **all** football models (player/goalkeeper/referee/ball, a
+dedicated ball detector, and pitch keypoints) from public Hugging Face repos and
+commits them to the `fhs-models` Volume. No Roboflow step needed. The models are
+also fetched lazily on first upload if the Volume is empty, so telestration works
+out of the box. The `huggingface-secret` is optional (repos are public) but uses
+your HF token when present.
 
 ## 3. Run it
 

@@ -49,17 +49,25 @@ models_vol = modal.Volume.from_name("fhs-models", create_if_missing=True)
 output_vol = modal.Volume.from_name("fhs-output", create_if_missing=True)
 VOLUMES = {f"{REMOTE}/models": models_vol, f"{REMOTE}/output": output_vol}
 
+# Optional Hugging Face token (for model downloads). Create it with:
+#   modal secret create huggingface-secret HF_TOKEN=hf_xxx
+# required=False -> deploy/runs still work without it (the model repos are public).
+try:
+    HF_SECRET = [modal.Secret.from_name("huggingface-secret", required=False)]
+except TypeError:                          # older Modal SDK without `required`
+    HF_SECRET = []
+
 
 # --------------------------------------------------------------------------- #
 # One-time: populate the models Volume (run: modal run modal_app.py::setup_models)
 # --------------------------------------------------------------------------- #
 @app.function(image=image, volumes={f"{REMOTE}/models": models_vol},
-              timeout=30 * 60)
+              secrets=HF_SECRET, timeout=30 * 60)
 def setup_models():
     import os
     import subprocess
     os.chdir(REMOTE)
-    subprocess.run(["bash", "scripts/download_models.sh"], check=False)
+    subprocess.run(["python", "scripts/fetch_models.py"], check=False)
     models_vol.commit()                    # persist downloaded weights
     print("models volume populated")
 
@@ -70,7 +78,7 @@ def setup_models():
 #   - scaledown_window: keep the GPU warm this long after the last request
 #   - @modal.concurrent: let one container handle several UI sessions
 # --------------------------------------------------------------------------- #
-@app.function(image=image, gpu=GPU, volumes=VOLUMES,
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=HF_SECRET,
               timeout=60 * 60, scaledown_window=300)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
@@ -94,7 +102,8 @@ def web():
 #   modal run modal_app.py::process --match-url https://.../match.mp4 --mode compilation
 # (Browser upload is fine for small files; for big matches prefer a Volume/URL.)
 # --------------------------------------------------------------------------- #
-@app.function(image=image, gpu=GPU, volumes=VOLUMES, timeout=2 * 60 * 60)
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=HF_SECRET,
+              timeout=2 * 60 * 60)
 def process(match_url: str, profile: str = "tiktok", mode: str = "per_clip"):
     import os
     import sys
