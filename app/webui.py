@@ -20,6 +20,38 @@ import gradio as gr
 from src.runner import run_pipeline
 from src.utils.io import load_config
 
+
+def _patch_gradio_client_schema_bug() -> None:
+    """Work around a gradio_client bug (TypeError: argument of type 'bool' is
+    not iterable) where boolean JSON-schema values crash API-info generation,
+    causing GET / -> 500. Harmless no-op if the internals differ."""
+    try:
+        import gradio_client.utils as u
+    except Exception:
+        return
+
+    _get_type = getattr(u, "get_type", None)
+    if _get_type is not None:
+        def get_type(schema):
+            if not isinstance(schema, dict):
+                return "Any"
+            return _get_type(schema)
+        u.get_type = get_type
+
+    _js = getattr(u, "_json_schema_to_python_type", None)
+    if _js is not None:
+        def _json_schema_to_python_type(schema, defs=None):
+            if isinstance(schema, bool):
+                return "bool"
+            try:
+                return _js(schema, defs)
+            except Exception:
+                return "Any"
+        u._json_schema_to_python_type = _json_schema_to_python_type
+
+
+_patch_gradio_client_schema_bug()
+
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
 INPUT_DIR.mkdir(exist_ok=True)
