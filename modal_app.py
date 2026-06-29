@@ -22,7 +22,7 @@ import modal
 
 APP_NAME = "football-highlight-studio"
 REMOTE = "/root/fhs"                       # project root inside the container
-GPU = "A10G"                               # T4 | L4 | A10G | A100 | H100
+GPU = "L40S"                               # L40S (target) | T4 | L4 | A10G | A100 | H100
 
 app = modal.App(APP_NAME)
 
@@ -74,12 +74,16 @@ def setup_models():
 
 # --------------------------------------------------------------------------- #
 # The WebUI, served on a GPU container as an ASGI app.
-#   - timeout: max seconds a single render request may run (raise for long matches)
+#   - timeout: max seconds a single render request may run. A full 1080p match
+#     can take ~45-75 min on an L40S, and the render streams progress back over
+#     one long-lived request, so this must comfortably exceed the worst case
+#     (2h) or the UI render is killed mid-way.
 #   - scaledown_window: keep the GPU warm this long after the last request
-#   - @modal.concurrent: let one container handle several UI sessions
+#   - @modal.concurrent: serve several UI sessions from one container (heavy
+#     render concurrency is separately gated by Gradio's .queue()).
 # --------------------------------------------------------------------------- #
 @app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=HF_SECRET,
-              timeout=60 * 60, scaledown_window=300)
+              timeout=2 * 60 * 60, scaledown_window=300)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
 def web():
