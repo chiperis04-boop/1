@@ -1,15 +1,20 @@
 """Branding overlays — the layer that makes every clip unmistakably *yours*.
 
-Driven by config/branding.yaml:
-  * hook question (first ~1.6s, big centred text)
-  * lower-third badge: moment type + match minute
-  * stats overlay: shot/sprint distance, players beaten
-  * persistent watermark
-  * intro sting + outro CTA (provided clips or generated cards)
+Driven by config/branding.yaml and rendered with the Pillow-based HUD engine
+(`src/edit/overlay_render.py`) — no more ffmpeg `drawtext`. Every element is a
+designed widget (rounded translucent card, channel-accent bar, drop-shadow
+typography) placed inside the configured **safe zones** so it never overlaps the
+broadcaster's own scoreboard / logos.
 
-Every concatenated segment is forced through `ff.standardize` so the parts share
-an identical stream layout (fixes the earlier concat/audio-mismatch bug). Text is
-escaped via `ff.esc_drawtext`.
+Elements and their timing (frame-accurate, fixes the static "GOAL - 2'" bug):
+  * hook question — only the first ~1.6s
+  * lower-third badge — "GOAL  67'" using the *correct* OCR minute, faded in
+    after the hook so the two never stack
+  * stats card — shot/sprint/speed/beaten on a card, top-right safe area
+  * watermark — persistent, low-opacity
+
+Intro/outro stings are real clips when provided, else generated Pillow title
+cards. Concatenation still goes through `ff.standardize` so stream params match.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ from pathlib import Path
 from ..detect.types import Moment
 from ..utils.io import get_logger
 from ..edit import ff
+from ..edit import overlay_render as ovr
 
 log = get_logger()
 
@@ -29,38 +35,45 @@ def apply_branding(clip_path: str, moment: Moment, stats: dict, out_path: str,
     """Burn the channel overlays. When `with_intro_outro` is False (compilation
     segment mode) the intro/outro stings are skipped — they are added once to
     the assembled reel instead."""
-    font = branding["channel"].get("font", "")
-    fontclause = f"fontfile={font}:" if font and Path(font).exists() else ""
+    w = cfg["_active_profile"]["width"]
+    h = cfg["_active_profile"]["height"]
     encoder = ff.pick_encoder(cfg["render"]["encoder"])
-    filters: list[str] = []
-    sidecars: list[str] = []
+    font = branding["channel"].get("font", "")
+    accent = branding["channel"].get("primary_color", [0, 220, 255])
+    zones = ovr.zones_from_cfg(cfg)
+    clip_dur = ff.duration(clip_path) or 1e9
 
-    def add(text: str, opts: str):
-        """Write text to a sidecar file and build a drawtext using textfile=,
-        which avoids all inline-escaping pitfalls (emoji, quotes, %, :)."""
-        if not text:
-            return
-        tf = out_path.replace(".mp4", f"_t{len(sidecars):02d}.txt")
-        Path(tf).write_text(text, encoding="utf-8")
-        sidecars.append(tf)
-        filters.append(f"drawtext={fontclause}textfile={tf}:expansion=none:{opts}")
+    overlays: list[ovr.Overlay] = []
+    pngs: list[str] = []
 
-    # ---- hook (first 1.6s) ----
+    def png(tag: str) -> str:
+        p = out_path.replace(".mp4", f"_{tag}.png")
+        pngs.append(p)
+        return p
+
+    # ---- hook (first 1.6s only) ----
+    hook_end = 1.6
     if branding.get("hook", {}).get("enabled"):
         hook = _pick_hook(branding, moment.kind)
-        add(hook, "fontcolor=white:fontsize=64:borderw=5:bordercolor=black:"
-                  "x=(w-text_w)/2:y=h*0.12:enable='between(t,0,1.6)'")
+        ov = ovr.hook_overlay(hook, w, h, font, png("hook"), zones,
+                              accent=accent, start=0.0, end=min(hook_end, clip_dur))
+        if ov:
+            overlays.append(ov)
 
-    # ---- lower third: GOAL - 67' ----
+    # ---- lower third: GOAL  67'  (correct minute, after the hook) ----
     lt = branding.get("lower_third", {})
     if lt.get("enabled"):
         label = moment.kind.upper()
         if lt.get("show_minute") and moment.minute is not None:
-            label += f"  -  {moment.minute}'"
-        add(label, "fontcolor=white:fontsize=46:box=1:boxcolor=black@0.55:"
-                   "boxborderw=18:x=60:y=h*0.82")
+            label += f"   {moment.minute}'"
+        ov = ovr.lower_third_overlay(label, w, h, font, png("lt"), zones,
+                                     accent=accent,
+                                     start=min(hook_end + 0.1, clip_dur),
+                                     end=clip_dur)
+        if ov:
+            overlays.append(ov)
 
-    # ---- stats overlay ----
+    # ---- stats card ----
     so = branding.get("stats_overlay", {})
     if so.get("enabled") and stats:
         approx = "" if stats.get("metric") else "~"   # mark pixel estimates
@@ -73,28 +86,25 @@ def apply_branding(clip_path: str, moment: Moment, stats: dict, out_path: str,
             lines.append(f"Top speed: {stats['top_speed_kmh']:.0f} km/h")
         if so.get("show_players_beaten") and stats.get("players_beaten") is not None:
             lines.append(f"Beaten: {stats['players_beaten']}")
-        for i, line in enumerate(lines):
-            add(line, "fontcolor=white:fontsize=38:box=1:boxcolor=black@0.45:"
-                      f"boxborderw=12:x=w-text_w-50:y=h*0.30+{i * 70}")
+        ov = ovr.stats_card_overlay(lines, w, h, font, png("stats"), zones,
+                                    accent=accent,
+                                    start=min(hook_end + 0.3, clip_dur),
+                                    end=clip_dur)
+        if ov:
+            overlays.append(ov)
 
     # ---- watermark ----
     wm = branding.get("watermark", {})
     if wm.get("enabled"):
-        add(wm["text"], f"fontcolor=white@{wm.get('opacity', 0.6)}:fontsize=34:"
-                        "x=w-text_w-30:y=40")
+        ov = ovr.watermark_overlay(wm.get("text", ""), w, h, font,
+                                   png("wm"), zones,
+                                   opacity=wm.get("opacity", 0.6))
+        if ov:
+            overlays.append(ov)
 
-    vf = ",".join(filters) if filters else "null"
     branded = out_path.replace(".mp4", "_branded.mp4")
-    ff.run([
-        "ffmpeg", "-y", "-i", clip_path, "-vf", vf,
-        *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k", branded,
-    ], desc="branding overlays")
-
-    for f in sidecars:
-        try:
-            Path(f).unlink()
-        except OSError:
-            pass
+    ovr.composite(clip_path, overlays, branded, encoder)
+    ovr.cleanup(pngs)
 
     if not with_intro_outro:
         Path(branded).replace(out_path)
@@ -102,7 +112,7 @@ def apply_branding(clip_path: str, moment: Moment, stats: dict, out_path: str,
         return out_path
 
     final = _add_intro_outro(branded, out_path, cfg, branding, encoder)
-    log.info(f"[branding] {moment.kind} -> {Path(final).name}")
+    log.info(f"[branding] {moment.kind} m={moment.minute} -> {Path(final).name}")
     return final
 
 
@@ -163,19 +173,22 @@ def _add_intro_outro(clip_path: str, out_path: str, cfg: dict, branding: dict,
 
 def _text_card(text: str, w: int, h: int, fps: int, out: str, branding: dict,
                encoder: str) -> str:
+    """A generated intro/outro title card, rendered with Pillow (no drawtext)
+    and given a silent stereo track so it concatenates cleanly."""
     font = branding["channel"].get("font", "")
-    fontclause = f"fontfile={font}:" if font and Path(font).exists() else ""
+    accent = branding["channel"].get("primary_color", [0, 220, 255])
+    png = out.replace(".mp4", "_card.png")
+    ovr.text_card_png(text, w, h, font, png, accent=accent)
     dur = 1.0
     ff.run([
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:d={dur}:r={fps}",
+        "-loop", "1", "-t", f"{dur}", "-i", png,
         "-f", "lavfi", "-t", f"{dur}", "-i",
         "anullsrc=channel_layout=stereo:sample_rate=48000",
-        "-vf", f"drawtext={fontclause}text='{ff.esc_drawtext(text)}':expansion=none:"
-               f"fontcolor=white:"
-               f"fontsize=80:x=(w-text_w)/2:y=(h-text_h)/2,format=yuv420p,setsar=1",
+        "-vf", f"fps={fps},format=yuv420p,setsar=1",
         "-map", "0:v", "-map", "1:a",
         *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-ac", "2", "-shortest", out,
     ], desc="text card")
+    ovr.cleanup([png])
     return out

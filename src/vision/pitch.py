@@ -61,6 +61,18 @@ class FrameHomography:
     idx: int
     H: np.ndarray | None = None        # 3x3 image->pitch, or None if unsolved
     n_points: int = 0
+    _Hinv: np.ndarray | None = None    # cached pitch->image
+
+    @property
+    def Hinv(self):
+        if self.H is None:
+            return None
+        if self._Hinv is None:
+            try:
+                self._Hinv = np.linalg.inv(self.H)
+            except np.linalg.LinAlgError:
+                return None
+        return self._Hinv
 
 
 @dataclass
@@ -77,6 +89,22 @@ class PitchCalibration:
         if abs(out[2]) < 1e-9:
             return None
         return float(out[0] / out[2]), float(out[1] / out[2])
+
+    def to_image(self, idx: int, x_m: float, y_m: float):
+        """Map a pitch-metres point back to image pixels (for warping tactical
+        graphics onto the grass plane); None if no homography for idx."""
+        fh = self.frames.get(idx)
+        if fh is None or fh.Hinv is None:
+            return None
+        pt = np.array([x_m, y_m, 1.0], dtype=np.float64)
+        out = fh.Hinv @ pt
+        if abs(out[2]) < 1e-9:
+            return None
+        return float(out[0] / out[2]), float(out[1] / out[2])
+
+    def has(self, idx: int) -> bool:
+        fh = self.frames.get(idx)
+        return fh is not None and fh.H is not None
 
     @property
     def coverage(self) -> float:

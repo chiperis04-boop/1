@@ -22,7 +22,9 @@ from .types import Signal
 log = get_logger()
 
 _SCORE_RE = re.compile(r"\b(\d{1,2})\s*[-:vV]\s*(\d{1,2})\b")
-_MINUTE_RE = re.compile(r"\b(\d{1,3})\s*[\u2032']?\b")
+# the match clock is a number explicitly marked as minutes ( 67'  45+2'  90’ )
+_CLOCK_RE = re.compile(r"\b(\d{1,3})(?:\s*\+\s*\d{1,2})?\s*[\u2032\u2019']")
+_MINUTE_RE = re.compile(r"\b(\d{1,3})\b")
 
 
 def detect_scoreboard(proxy_path: str, cfg: dict) -> list[Signal]:
@@ -58,7 +60,7 @@ def detect_scoreboard(proxy_path: str, cfg: dict) -> list[Signal]:
         crop = _crop_roi(frame, roi)
         text = _ocr_join(reader, crop)
         score = _parse_score(text)
-        minute = _parse_minute(text)
+        minute = _parse_minute(text, score_match=_SCORE_RE.search(text or ""))
 
         if score is not None:
             if last_score is None:
@@ -103,12 +105,32 @@ def _parse_score(text: str):
     return int(m.group(1)), int(m.group(2))
 
 
-def _parse_minute(text: str):
-    m = _MINUTE_RE.search(text or "")
-    if not m:
-        return None
-    val = int(m.group(1))
-    return val if 0 <= val <= 130 else None
+def _parse_minute(text: str, score_match=None):
+    """Read the match clock, not the scoreline.
+
+    The old regex grabbed the *first* number in the OCR string — which is the
+    home-team score (e.g. "2 - 1  67'") — so a 67th-minute goal was labelled
+    "GOAL - 2'". We now (1) strip the matched score span first, then (2) strongly
+    prefer a number explicitly marked as minutes (an apostrophe/prime, optionally
+    with stoppage like "45+2'"), and only fall back to a bare number if no
+    clock mark exists.
+    """
+    t = text or ""
+    if score_match is not None:
+        t = (t[:score_match.start()] + "  " + t[score_match.end():])
+
+    m = _CLOCK_RE.search(t)
+    if m:
+        val = int(m.group(1))
+        return val if 0 <= val <= 130 else None
+
+    # no explicit clock mark: take the first plausible standalone minute, but
+    # never one that is immediately part of a score-like "N - N" pattern.
+    for m in _MINUTE_RE.finditer(t):
+        val = int(m.group(1))
+        if 0 <= val <= 130:
+            return val
+    return None
 
 
 def _is_increment(prev, cur) -> bool:

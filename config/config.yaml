@@ -104,6 +104,22 @@ vision:
   iou_threshold: 0.5
   imgsz: 1280
   tracker: bytetrack            # via supervision
+
+  # ---- tracker-coordinate smoothing (de-jitter circles/traces/camera) ----
+  smoothing:
+    enabled: true
+    method: savgol              # savgol | ema
+    window: 9                   # odd; larger = smoother (more lag)
+    poly: 2
+
+  # ---- player segmentation -> correct depth layering (graphics under players) ----
+  # When enabled and a YOLO-seg model is available, player silhouettes are used
+  # to keep footballers ABOVE the tactical graphics. Falls back to bbox-ellipse
+  # masking when off or unavailable. A seg model costs an extra inference pass.
+  segmentation:
+    enabled: false
+    model: null                 # null = reuse player_model if it is a -seg model
+
   # Fallback class indices ONLY — at runtime classes are resolved BY NAME from
   # the model itself, so any football model works regardless of index order.
   classes:
@@ -138,6 +154,9 @@ telestration:
   ball_trail: true              # fading trail behind the ball
   highlight_zone: true          # shade free space / danger zone
   freeze_callout: true          # freeze + zoom + arrow before key action
+  pass_line: true               # play link from the key player to the ball
+  spotlight_radius_m: 1.6       # ground-circle radius (metres) when calibrated
+  trail_length: 22              # ball-trail history length (frames)
   arrow_color: [0, 200, 255]    # BGR
   spotlight_color: [0, 220, 255]
   trail_color: [255, 255, 255]
@@ -147,11 +166,20 @@ edit:
   reframe:
     target_aspect: "9:16"       # 9:16 | 1:1 | 16:9
     mode: action_track          # action_track | center | letterbox
-    smoothing: 0.85             # camera smoothing for the virtual crop
+    smoothing: 0.85             # (legacy) retained for back-compat
+    # cinematic virtual camera: follow ball + active player only
+    deadzone: 0.12              # central comfort zone (fraction of crop width)
+    smooth_time: 0.55           # seconds for a pan to settle (SmoothDamp)
+    max_pan_frac: 0.7           # velocity cap, fraction of source width / second
+    presmooth_window: 11        # Savitzky-Golay window on the focus signal
   effects:
     slowmo_on_key: true
     slowmo_factor: 0.4
     slowmo_window: 2.5
+    slowmo:
+      audio_mode: duck          # duck | mute | pitch_preserve
+      duck_level: 0.15          # match-audio level during slow-mo (duck mode)
+      interpolate: true         # minterpolate for smooth (non-stutter) slow-mo
     freeze_zoom: true
     freeze_zoom_scale: 1.4
   audio:
@@ -171,6 +199,12 @@ render:
   encoder: h264_nvenc           # h264_nvenc | libx264
   crf: 20                       # used for libx264; nvenc uses -cq
   fps: 30
+  # safe zones: fractional keep-out bands (top/bottom) where the broadcaster's
+  # own scorebug / sponsor tickers live. Custom HUD is placed inside the band so
+  # it never overlaps the match score or channel logos.
+  safe_zones:
+    top: 0.10
+    bottom: 0.10
   # per_clip  = one finished clip per detected moment (~15-23s each)
   # compilation = one reel that stitches several moments to a target length
   output_mode: per_clip         # per_clip | compilation

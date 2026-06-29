@@ -269,6 +269,14 @@ def _process_clip(i, m: Moment, clip: str, cfg, brand, out_dir, cr: ClipResult,
             stage = "track"
             track = track_clip(clip, cfg)
 
+            # de-jitter tracker coordinates so circles/traces/camera glide
+            sm = cfg["vision"].get("smoothing", {})
+            if sm.get("enabled", True):
+                from .vision.smoothing import smooth_track
+                smooth_track(track, method=sm.get("method", "savgol"),
+                             window=int(sm.get("window", 9)),
+                             poly=int(sm.get("poly", 2)))
+
             # L3: team classification -> possession-aware protagonist
             if cfg["vision"].get("teams", {}).get("enabled"):
                 from .vision.teams import TeamClassifier, pick_key_player
@@ -277,7 +285,7 @@ def _process_clip(i, m: Moment, clip: str, cfg, brand, out_dir, cr: ClipResult,
                 if kp is not None:
                     track.key_track_id = kp
 
-            # L2: pitch homography -> metric stats
+            # L2: pitch homography -> metric stats + grass-plane graphics
             calib = None
             if cfg["vision"].get("pitch", {}).get("enabled"):
                 stage = "calibrate"
@@ -286,7 +294,8 @@ def _process_clip(i, m: Moment, clip: str, cfg, brand, out_dir, cr: ClipResult,
 
             stats = compute_stats(track, calib)
             stage = "telestrate"
-            cur = render_telestration(clip, track, str(work / "telestrated.mp4"), cfg)
+            cur = render_telestration(clip, track, str(work / "telestrated.mp4"),
+                                      cfg, calib=calib)
             stage = "reframe"
             cur = reframe_clip(cur, track, str(work / "reframed.mp4"), cfg)
         else:
