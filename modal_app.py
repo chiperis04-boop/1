@@ -201,7 +201,15 @@ def web():
 
     from fastapi import FastAPI
     from gradio.routes import mount_gradio_app
-    from app.webui import build
+    from app.webui import build, set_job_launcher
+
+    # Wire the detached-job launcher so the v2 "Render" button spawns studio_job
+    # in its own container (survives a closed browser / dropped session).
+    def _launch(name, profile, limit, options):
+        import json as _json
+        input_vol.commit()                 # make the uploaded file visible to the job
+        studio_job.spawn(name, profile, int(limit), _json.dumps(options or {}))
+    set_job_launcher(_launch)
 
     demo = build().queue()                 # .queue() enables the streaming progress
     fastapi_app = FastAPI()
@@ -275,6 +283,80 @@ def studio_local(name: str = "4.mp4", profile: str = "tiktok", limit: int = 0):
           f"goals={result.goals} finished={ok}/{len(result.clips)} "
           f"director={'vllm' if overrides else 'heuristic'} -> output/{name.rsplit('.', 1)[0]}/")
     return result.to_dict()
+
+
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,
+              timeout=6 * 60 * 60)
+def studio_job(name: str, profile: str = "tiktok", limit: int = 0,
+               overrides_json: str = ""):
+    """Detached v2 run for the WebUI: processes a file on the fhs-input Volume
+    in its OWN container and writes progress to output/<name>/_status.json.
+
+    Because it runs independently of the web request, the render finishes even
+    if the browser tab is closed or the session drops — the page just polls the
+    status file. This is what makes 'do everything in the UI, never falls' work.
+    """
+    import json
+    import os
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, REMOTE)
+    os.chdir(REMOTE)
+
+    out_dir = Path("output") / Path(name).stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+    status = out_dir / "_status.json"
+
+    def _write(d):
+        status.write_text(json.dumps(d), encoding="utf-8")
+
+    local = os.path.join("input", name)
+    if not os.path.exists(local):
+        _write({"stage": "error", "status": "failed", "done": True,
+                "error": f"{name} not found on the fhs-input Volume"})
+        output_vol.commit()
+        return {"status": "failed"}
+
+    try:
+        overrides = json.loads(overrides_json) if overrides_json else {}
+    except Exception:  # noqa: BLE001
+        overrides = {}
+    vo = _vlm_overrides()                   # wire the vLLM endpoint if configured
+    if vo and overrides.get("director", {}).get("backend") in ("openai", "gemini"):
+        overrides.setdefault("director", {}).update(
+            {"base_url": vo["director"]["base_url"],
+             "model": overrides["director"].get("model") or vo["director"]["model"]})
+
+    _write({"stage": "start", "pct": 0, "msg": "queued",
+            "status": "running", "done": False})
+    output_vol.commit()
+    last = {"pct": -10.0}
+
+    def on_progress(stage, pct, msg=""):
+        _write({"stage": stage, "pct": pct, "msg": msg,
+                "status": "running", "done": False})
+        if stage == "done" or (pct - last["pct"]) >= 5:
+            last["pct"] = pct
+            try:
+                output_vol.commit()        # make progress visible to the WebUI
+            except Exception:  # noqa: BLE001
+                pass
+
+    from src.studio_pipeline import run_studio
+    try:
+        result = run_studio(local, profile=profile, limit=int(limit),
+                            on_progress=on_progress, overrides=overrides or None)
+        clips = [{"kind": c.kind, "status": c.status,
+                  "hero_number": c.hero_number} for c in result.clips]
+        _write({"stage": "done", "pct": 100, "status": result.status,
+                "done": True, "clips": clips, "goals": result.goals,
+                "windows": result.windows})
+    except Exception as exc:  # noqa: BLE001
+        _write({"stage": "error", "pct": 100, "status": "failed",
+                "done": True, "error": str(exc)})
+    finally:
+        output_vol.commit()
+    return {"status": "done"}
 
 
 @app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,

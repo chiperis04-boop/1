@@ -122,6 +122,73 @@ def _input_files() -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# detached server jobs (reliable: survive a closed browser / dropped session)
+# --------------------------------------------------------------------------- #
+# On Modal, modal_app.web() injects a launcher that .spawn()s the studio_job
+# function in its OWN container. The heavy render then runs to completion
+# independent of the WebUI request, and the page just polls _status.json.
+_JOB_LAUNCHER = None
+
+
+def set_job_launcher(fn) -> None:
+    """Wire a detached-job launcher: fn(match_name, profile, limit, options)."""
+    global _JOB_LAUNCHER
+    _JOB_LAUNCHER = fn
+
+
+def _reload_output_volume() -> None:
+    try:
+        import modal
+        modal.Volume.from_name("fhs-output").reload()
+    except Exception:
+        pass
+
+
+def _read_status(match_name: str) -> dict:
+    if not match_name:
+        return {}
+    _reload_output_volume()
+    f = OUTPUT_DIR / match_name / "_status.json"
+    if not f.exists():
+        return {}
+    try:
+        import json
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def job_status(match_name: str):
+    """Poll a detached server job's status + surface any finished clips.
+
+    A plain request/response (no streaming), so it is robust to the browser
+    disconnecting — the job keeps running on the server regardless."""
+    st = _read_status(match_name)
+    clips = _clips_for(match_name)
+    first = clips[0] if clips else None
+    lines: list[str] = []
+    if st:
+        if st.get("done"):
+            lines.append(f"✅ Статус: {st.get('status', '?')} — обработка завершена.")
+        else:
+            lines.append(f"⏳ {float(st.get('pct', 0)):.0f}% — "
+                         f"{st.get('stage', '')}: {st.get('msg', '')}")
+        for c in st.get("clips", []):
+            mark = "✓" if c.get("status") == "ok" else (
+                "—" if c.get("status") == "skipped" else "✗")
+            lines.append(f"   {mark} {c.get('kind')}: {c.get('status')}")
+        if st.get("error"):
+            lines.append(f"❌ {st['error']}")
+    elif clips:
+        lines.append(f"{len(clips)} клип(ов) найдено в результатах.")
+    else:
+        lines.append("Пока нет данных — задача ещё идёт или не запускалась. "
+                     "Подождите и нажмите ещё раз.")
+    return ("\n".join(lines), gr.update(choices=clips, value=first), first,
+            _caption_for(first) if first else "", _all_outputs(match_name))
+
+
+# --------------------------------------------------------------------------- #
 # create / render
 # --------------------------------------------------------------------------- #
 def render_job(video_path, server_pick, profile, output_mode, target_seconds,
@@ -136,7 +203,7 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
                           Cameraman BoT-SORT+CMC -> teams/jersey/possession
                           analytics -> Composer)
     """
-    empty = (gr.update(), gr.update(), gr.update(), gr.update())
+    empty = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
     if not chosen:
         yield ("⚠️ Upload a match video, or pick one already on the server "
@@ -149,9 +216,6 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
         shutil.copy(src, dst)
     match_name = dst.stem
     is_v2 = str(engine).lower().startswith("studio")
-
-    q: queue.Queue = queue.Queue()
-    holder: dict = {}
 
     if is_v2:
         overrides = {
@@ -167,6 +231,25 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
                      "audio": {"music_volume": float(music_vol)}},
             "director": {"backend": str(v2_director)},
         }
+        # Reliable path on Modal: run the studio in its OWN detached container so
+        # closing the browser / a dropped session never kills the render.
+        if _JOB_LAUNCHER is not None:
+            try:
+                _JOB_LAUNCHER(match_name, profile, int(limit), overrides)
+                yield (f"▶ Серверная задача запущена для «{match_name}».\n"
+                       "Она НЕ упадёт при закрытии вкладки или обрыве связи.\n"
+                       "Нажимайте «↻ Статус / результаты» ниже, чтобы видеть "
+                       "прогресс и забрать готовые ролики.",
+                       gr.update(), gr.update(), gr.update(), gr.update(),
+                       match_name)
+            except Exception as exc:  # noqa: BLE001
+                yield (f"❌ Не удалось запустить серверную задачу: {exc}", *empty)
+            return
+
+    q: queue.Queue = queue.Queue()
+    holder: dict = {}
+
+    if is_v2:
 
         def cb(stage, pct, msg=""):
             q.put(("pv2", (stage, pct, msg)))
@@ -220,7 +303,7 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
     engine_label = "Studio v2" if is_v2 else "Classic v1"
     log: list[str] = [f"▶ Starting: {match_name}  (engine={engine_label}, "
                       f"profile={profile})"]
-    yield "\n".join(log), *empty
+    yield "\n".join(log), gr.update(), gr.update(), gr.update(), gr.update(), match_name
 
     while True:
         kind, payload = q.get()
@@ -272,6 +355,7 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
         first,                                       # video preview
         _caption_for(first) if first else "",        # caption box
         _all_outputs(match_name),                    # downloadable files
+        match_name,                                  # status_match field
     )
 
 
@@ -368,6 +452,12 @@ def build() -> gr.Blocks:
                     preview = gr.Video(label="Preview")
                     caption = gr.Textbox(label="Caption / hashtags", lines=4)
                     files = gr.Files(label="Download")
+                    status_match = gr.Textbox(
+                        label="Матч задачи (серверный режим)",
+                        info="Заполняется при запуске. Жмите «Статус / "
+                             "результаты», чтобы видеть прогресс и забрать "
+                             "ролики — даже если закрывали вкладку.")
+                    status_btn = gr.Button("↻ Статус / результаты")
 
             run_btn.click(
                 render_job,
@@ -375,8 +465,11 @@ def build() -> gr.Blocks:
                         use_vision, slowmo, freeze, telestration,
                         limit, zscore, min_conf, music_vol,
                         engine, v2_director, v2_team_halos, v2_jerseys, v2_pitch],
-                outputs=[logbox, clip_dd, preview, caption, files],
+                outputs=[logbox, clip_dd, preview, caption, files, status_match],
             )
+            status_btn.click(
+                job_status, inputs=status_match,
+                outputs=[logbox, clip_dd, preview, caption, files])
             refresh_inputs.click(lambda: gr.update(choices=_input_files()),
                                  outputs=server_pick)
             clip_dd.change(on_pick_clip, inputs=clip_dd, outputs=[preview, caption])
