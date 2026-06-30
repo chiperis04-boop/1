@@ -79,6 +79,22 @@ detect:
     verified_goal_boost: 0.25     # confidence bump when a goal is score-verified
     merge_gap_seconds: 15.0       # collapse anchors closer than this
 
+  # ---- event feed: drive clipping from a detailed textual match report ----
+  # The most reliable + cheapest moment source (ClipMaker-style). Supply a
+  # play-by-play (CSV/JSON/text) and the per-period kick-off offsets that map the
+  # match clock to this video file, and the Scout places precise event windows.
+  # COMPLIANCE: prefer public-domain (openfootball) / licensed feeds; scraping
+  # some sites breaches their ToS — sourcing rights are the operator's job.
+  event_feed:
+    enabled: false                # set true + give a source to use the feed
+    source: null                  # path to .csv/.json/.txt (or wired from the WebUI)
+    # video-time (seconds) of each period's kick-off in THIS file. Mark these
+    # once per match (e.g. 2nd half kicks off at 45:40 -> 2740).
+    kickoffs: {}                  # e.g. {1: 0, 2: 2740}
+    min_importance: 0.0           # drop feed events below this xT/importance
+    align_to_ocr: true            # snap goal windows to the scoreboard OCR clock
+    ocr_align_radius_seconds: 40.0
+
 fusion:
   # final score = weighted sum of normalized signal strengths
   weights:

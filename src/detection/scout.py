@@ -66,6 +66,29 @@ def scout_events(
     sc = cfg.get("detect", {}).get("scout", {})
     proxy = proxy_path or video_path
 
+    # 0) event feed (textual play-by-play) — the most reliable + cheapest source
+    #    when available. Map match-clock events to video time via kick-off
+    #    offsets (ClipMaker-style), optionally snapped to the OCR score clock.
+    ef = cfg.get("detect", {}).get("event_feed", {})
+    if ef.get("enabled") and ef.get("source"):
+        try:
+            from .event_feed import align_to_ocr, events_to_windows, load_events
+            events = load_events(ef["source"], cfg)
+            fw = events_to_windows(events, ef.get("kickoffs", {}), cfg, duration)
+            if fw:
+                if ef.get("align_to_ocr", True):
+                    try:
+                        fw = align_to_ocr(fw, detect_scoreboard(proxy, cfg), cfg)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(f"[scout] OCR alignment skipped: {exc}")
+                log.info(f"[scout] using {len(fw)} event-feed windows "
+                         f"({sum(w.verified for w in fw)} goals)")
+                return fw
+            log.warning("[scout] event feed yielded no windows; "
+                        "falling back to detector discovery")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[scout] event feed unavailable ({exc}); detector discovery")
+
     # 1) named events (goal/shot/card/...) from the action-spotting model
     action_sigs: list[Signal] = []
     try:
