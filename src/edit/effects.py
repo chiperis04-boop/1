@@ -17,6 +17,29 @@ _MIN_CLIP_FOR_SLOWMO = 4.0   # seconds
 _EDGE_GUARD = 0.4            # keep effects away from the very edges
 
 
+def _atempo_chain(factor: float) -> str:
+    """Build an ``atempo`` filter chain whose product equals ``factor``.
+
+    A single ``atempo`` only accepts 0.5..2.0. The previous code *clamped* the
+    audio to ``max(0.5, factor)`` while the video was slowed by ``1/factor``;
+    for the default ``slowmo_factor=0.4`` that stretched the video window x2.5
+    but the audio only x2.0, leaving the audio ~0.5*window short and pushing the
+    rest of the clip out of sync. Chaining 0.5 stages (e.g. 0.4 -> 0.5*0.8)
+    reaches any target factor exactly, so the slowed audio matches the slowed
+    video and the streams stay aligned (audio-safe slow-mo for factors < 0.5).
+    """
+    f = max(0.01, float(factor))
+    parts: list[float] = []
+    while f < 0.5:
+        parts.append(0.5)
+        f /= 0.5
+    while f > 2.0:
+        parts.append(2.0)
+        f /= 2.0
+    parts.append(f)
+    return ",".join(f"atempo={p:.6f}" for p in parts)
+
+
 def apply_slowmo(clip_path: str, key_t: float, out_path: str, cfg: dict) -> str:
     e = cfg["edit"]["effects"]
     if not e.get("slowmo_on_key", True):
@@ -37,7 +60,7 @@ def apply_slowmo(clip_path: str, key_t: float, out_path: str, cfg: dict) -> str:
         return clip_path
 
     pts = 1.0 / factor
-    atempo = max(0.5, min(2.0, factor))          # atempo valid range 0.5..2.0
+    atempo = _atempo_chain(factor)               # audio-safe even for factor < 0.5
     encoder = ff.pick_encoder(cfg["render"]["encoder"])
 
     vf = (
@@ -48,7 +71,7 @@ def apply_slowmo(clip_path: str, key_t: float, out_path: str, cfg: dict) -> str:
     )
     af = (
         f"[0:a]atrim=0:{start:.3f},asetpts=PTS-STARTPTS[a0];"
-        f"[0:a]atrim={start:.3f}:{end:.3f},asetpts=PTS-STARTPTS,atempo={atempo:.3f}[a1];"
+        f"[0:a]atrim={start:.3f}:{end:.3f},asetpts=PTS-STARTPTS,{atempo}[a1];"
         f"[0:a]atrim={end:.3f},asetpts=PTS-STARTPTS[a2];"
         f"[a0][a1][a2]concat=n=3:v=0:a=1[a]"
     )
