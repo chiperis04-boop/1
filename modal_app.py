@@ -148,3 +148,31 @@ def process(match_url: str, profile: str = "tiktok", mode: str = "per_clip"):
     print("status:", result.status, "reel:", result.reel_path,
           "clips:", sum(c.status == "ok" for c in result.clips))
     return result.to_dict()
+
+
+# --------------------------------------------------------------------------- #
+# v2 studio chain headless (Scout -> Director -> Cameraman+CMC -> Composer):
+#   modal run modal_app.py::studio --match-url https://.../match.mp4
+# Set director.backend=gemini via the huggingface/secret env if you want the LLM
+# manifest; otherwise it uses the offline heuristic director.
+# --------------------------------------------------------------------------- #
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=HF_SECRET,
+              timeout=2 * 60 * 60)
+def studio(match_url: str, profile: str = "tiktok"):
+    import os
+    import sys
+    import urllib.request
+    sys.path.insert(0, REMOTE)
+    os.chdir(REMOTE)
+
+    os.makedirs("input", exist_ok=True)
+    local = "input/match.mp4"
+    urllib.request.urlretrieve(match_url, local)
+
+    from src.studio_pipeline import run_studio
+    result = run_studio(local, profile=profile)
+    output_vol.commit()
+    ok = sum(c.status == "ok" for c in result.clips)
+    print(f"studio status={result.status} events={result.windows} "
+          f"goals={result.goals} finished={ok}/{len(result.clips)}")
+    return result.to_dict()

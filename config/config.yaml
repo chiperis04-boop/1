@@ -69,6 +69,16 @@ detect:
     min_conf: 0.5
     labels_map: {}               # extra {model_label: our_kind} overrides
 
+  # ---- scout: how event windows are built + score-verified (v2 pipeline) ----
+  scout:
+    goal_pre_seconds: 20.0        # blueprint: -20s before a goal anchor
+    goal_post_seconds: 10.0       # blueprint: +10s after
+    pre_seconds: 7.0
+    post_seconds: 5.0
+    verify_radius_seconds: 25.0   # OCR score-change must land within this of an anchor
+    verified_goal_boost: 0.25     # confidence bump when a goal is score-verified
+    merge_gap_seconds: 15.0       # collapse anchors closer than this
+
 fusion:
   # final score = weighted sum of normalized signal strengths
   weights:
@@ -131,6 +141,17 @@ vision:
     method: hsv                 # hsv | siglip
     n_teams: 2
 
+  # ---- jersey number recognition (EasyOCR) -> hero match by number ----
+  # Lets the Director's "follow #18" bind to the right track id instead of just
+  # the nearest player to the ball. Best on close/replay frames; degrades to the
+  # geometric pick when numbers can't be read on wide shots.
+  jerseys:
+    enabled: true
+    sample_every_frames: 3      # OCR every Nth frame (cost control)
+    min_box_height_px: 60       # skip tiny far-away players
+    min_confidence: 0.35        # aggregate confidence to trust a number
+    min_reads: 2                # need at least this many sightings
+
 telestration:
   enabled: true
   spotlight_scorer: true        # moving glow under the key player
@@ -142,6 +163,8 @@ telestration:
   spotlight_color: [0, 220, 255]
   trail_color: [255, 255, 255]
   line_thickness: 4
+  team_halos: true              # colour every player's halo in their club colour
+                                # (from vision.teams); hero gets a thicker ring
 
 edit:
   reframe:
@@ -184,3 +207,46 @@ render:
     reels:    { width: 1080, height: 1920, fps: 30 }
     shorts:   { width: 1080, height: 1920, fps: 30 }
     youtube:  { width: 1920, height: 1080, fps: 30 }
+
+
+# ============================================================
+# v2 studio pipeline (src/studio_pipeline.py) — Scout/Director/
+# Cameraman/Composer. The legacy pipeline ignores these blocks.
+# ============================================================
+
+# ---- Director: vision-LLM editing manifest ----
+director:
+  backend: heuristic            # heuristic | gemini | openai (MiniCPM/local)
+  model: gemini-1.5-flash       # gemini model id, or openai/local model name
+  base_url: null                # OpenAI-compatible endpoint (e.g. local MiniCPM-V)
+  sample_fps: 1.0               # frames/sec fed to the model
+  max_frames: 16
+  temperature: 0.4
+  # offline hook fallbacks if no LLM and no brand hooks
+  hooks: {}
+
+# ---- Cameraman: BoT-SORT + camera motion compensation + smoothing ----
+tracking:
+  backend: ultralytics          # ultralytics (built-in BoT-SORT+GMC) | roboflow
+  gmc_method: sparseOptFlow      # sparseOptFlow | orb | sift | ecc | none
+  track_high_thresh: 0.25
+  track_low_thresh: 0.1
+  new_track_thresh: 0.25
+  track_buffer: 60
+  match_thresh: 0.8
+  with_reid: false
+  # viewport smoothing (constant-velocity Kalman; EMA fallback)
+  kalman_process_noise: 2.0      # higher = camera reacts faster
+  kalman_measurement_noise: 120.0  # higher = camera is lazier/smoother
+  smoothing: 0.85                # EMA alpha (used only if Kalman fails)
+
+# ---- Graphics: pitch homography for grass-anchored overlays ----
+graphics:
+  enabled: false                 # opt-in; needs the pitch model (auto-downloaded)
+  homography_solver: cv2         # cv2 (RANSAC) | kornia | kornia_lines
+
+# ---- Possession: ball-to-nearest-player proximity tracking ----
+possession:
+  radius_m: 1.5                  # blueprint: ~1 m; 1.5 m is practical for broadcast
+  min_frames: 3                  # blueprint: hold > 3 frames to confirm
+  bridge_frames: 3               # tolerate brief detection dropouts within a run

@@ -61,6 +61,44 @@ def run(
 
 
 @app.command()
+def studio(
+    match: str = typer.Argument(..., help="Path to the full match video"),
+    profile: str = typer.Option("tiktok", help="Output profile (see list-profiles)"),
+    config: str = typer.Option("config/config.yaml"),
+    branding: str = typer.Option("config/branding.yaml"),
+    out: str = typer.Option("output", help="Output root directory"),
+    limit: int = typer.Option(0, help="Only render the top-N events (0 = all)"),
+):
+    """v2 pipeline: Scout -> Director -> Cameraman (BoT-SORT+CMC) -> Composer."""
+    from .studio_pipeline import run_studio
+    with RichProgress(SpinnerColumn(), TextColumn("[bold]{task.fields[stage]}"),
+                      BarColumn(), TextColumn("{task.description}"),
+                      console=console) as prog:
+        task = prog.add_task("starting", total=100, stage="init")
+
+        def cb(stage, pct, msg):
+            prog.update(task, completed=pct, stage=stage, description=msg)
+
+        result = run_studio(match, profile=profile, config=config,
+                            branding=branding, out_root=out, limit=limit,
+                            on_progress=cb)
+
+    if result.status == "failed" and not result.clips:
+        console.print(f"[red]Failed:[/red] {result.error}")
+        raise typer.Exit(1)
+    table = Table(title=f"Studio result — {result.status}")
+    table.add_column("#"); table.add_column("kind"); table.add_column("status")
+    table.add_column("hook / err")
+    for c in result.clips:
+        info = ((c.manifest or {}).get("video_hook_text", "")
+                if c.status == "ok" else f"{c.stage_failed}: {c.error}")
+        table.add_row(str(c.index), c.kind, c.status, str(info))
+    console.print(table)
+    console.print(f"[green]Output:[/green] {result.out_dir}  "
+                  f"(events={result.windows}, goals={result.goals})")
+
+
+@app.command()
 def detect(match: str, config: str = typer.Option("config/config.yaml")):
     """Only run detection and print the ranked moments (no rendering)."""
     from .runner import _detect_and_fuse

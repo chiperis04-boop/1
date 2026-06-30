@@ -13,6 +13,9 @@ setup: ## Create venv + install deps (CPU torch). For GPU, see docs/SETUP.md.
 		pip install -r requirements.txt
 	@echo ">> Activate with: source $(VENV)/bin/activate"
 
+bootstrap: ## Auto-install EVERYTHING (torch GPU/CPU autodetect + deps + all model weights)
+	$(PY) -m scripts.setup
+
 models: ## Download / prepare models
 	bash scripts/download_models.sh
 
@@ -31,4 +34,4 @@ check: ## Byte-compile all sources (fast sanity check)
 clean: ## Remove work/output artifacts
 	rm -rf output/*/work
 
-.PHONY: help setup models detect run profiles check clean
+.PHONY: help setup models detect run profiles check clean bootstrap

@@ -126,10 +126,17 @@ def _input_files() -> list[str]:
 # --------------------------------------------------------------------------- #
 def render_job(video_path, server_pick, profile, output_mode, target_seconds,
                use_vision, slowmo, freeze, telestration, limit, zscore,
-               min_conf, music_vol):
-    """Generator: streams a log, then yields final preview state."""
+               min_conf, music_vol, engine, v2_director, v2_team_halos,
+               v2_jerseys, v2_pitch):
+    """Generator: streams a log, then yields final preview state.
+
+    Supports two engines:
+      * "Classic (v1)" — src.runner.run_pipeline (audio/scene fusion pipeline)
+      * "Studio (v2)"  — src.studio_pipeline.run_studio (Scout -> Director ->
+                          Cameraman BoT-SORT+CMC -> teams/jersey/possession
+                          analytics -> Composer)
+    """
     empty = (gr.update(), gr.update(), gr.update(), gr.update())
-    # a browser upload takes priority; otherwise use a file already on the server
     chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
     if not chosen:
         yield ("⚠️ Upload a match video, or pick one already on the server "
@@ -141,57 +148,94 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
     if src.resolve() != dst.resolve():
         shutil.copy(src, dst)
     match_name = dst.stem
-
-    tgt = float(target_seconds)
-    overrides = {
-        "vision": {"enabled": bool(use_vision)},
-        "telestration": {"enabled": bool(telestration)},
-        "edit": {
-            "effects": {"slowmo_on_key": bool(slowmo), "freeze_zoom": bool(freeze)},
-            "audio": {"music_volume": float(music_vol)},
-        },
-        "detect": {"audio": {"zscore_threshold": float(zscore)}},
-        "fusion": {"min_confidence": float(min_conf)},
-        "render": {
-            "output_mode": output_mode,
-            "compilation": {
-                "target_seconds": tgt,
-                "min_seconds": max(10.0, tgt - 12),
-                "max_seconds": tgt + 12,
-            },
-        },
-    }
+    is_v2 = str(engine).lower().startswith("studio")
 
     q: queue.Queue = queue.Queue()
     holder: dict = {}
 
-    def cb(p):
-        q.put(("p", p))
+    if is_v2:
+        overrides = {
+            "vision": {
+                "enabled": bool(use_vision),
+                "jerseys": {"enabled": bool(v2_jerseys)},
+                "pitch": {"enabled": bool(v2_pitch)},
+            },
+            "graphics": {"enabled": bool(v2_pitch)},
+            "telestration": {"enabled": bool(telestration),
+                             "team_halos": bool(v2_team_halos)},
+            "edit": {"effects": {"slowmo_on_key": bool(slowmo)},
+                     "audio": {"music_volume": float(music_vol)}},
+            "director": {"backend": str(v2_director)},
+        }
 
-    def worker():
-        try:
-            holder["result"] = run_pipeline(
-                str(dst), profile=profile, limit=int(limit),
-                on_progress=cb, overrides=overrides)
-        except Exception as exc:  # noqa: BLE001
-            holder["error"] = str(exc)
-        finally:
-            q.put(("done", None))
+        def cb(stage, pct, msg=""):
+            q.put(("pv2", (stage, pct, msg)))
+
+        def worker():
+            try:
+                from src.studio_pipeline import run_studio
+                holder["result"] = run_studio(
+                    str(dst), profile=profile, limit=int(limit),
+                    on_progress=cb, overrides=overrides)
+            except Exception as exc:  # noqa: BLE001
+                holder["error"] = str(exc)
+            finally:
+                q.put(("done", None))
+    else:
+        tgt = float(target_seconds)
+        overrides = {
+            "vision": {"enabled": bool(use_vision)},
+            "telestration": {"enabled": bool(telestration)},
+            "edit": {
+                "effects": {"slowmo_on_key": bool(slowmo), "freeze_zoom": bool(freeze)},
+                "audio": {"music_volume": float(music_vol)},
+            },
+            "detect": {"audio": {"zscore_threshold": float(zscore)}},
+            "fusion": {"min_confidence": float(min_conf)},
+            "render": {
+                "output_mode": output_mode,
+                "compilation": {
+                    "target_seconds": tgt,
+                    "min_seconds": max(10.0, tgt - 12),
+                    "max_seconds": tgt + 12,
+                },
+            },
+        }
+
+        def cb(p):
+            q.put(("p", p))
+
+        def worker():
+            try:
+                holder["result"] = run_pipeline(
+                    str(dst), profile=profile, limit=int(limit),
+                    on_progress=cb, overrides=overrides)
+            except Exception as exc:  # noqa: BLE001
+                holder["error"] = str(exc)
+            finally:
+                q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
 
-    log: list[str] = [f"▶ Starting: {match_name}  (profile={profile})"]
+    engine_label = "Studio v2" if is_v2 else "Classic v1"
+    log: list[str] = [f"▶ Starting: {match_name}  (engine={engine_label}, "
+                      f"profile={profile})"]
     yield "\n".join(log), *empty
 
     while True:
         kind, payload = q.get()
-        if kind == "p":
+        if kind == "p":                       # v1 Progress object
             bar = "█" * int(payload.percent / 5)
             extra = ""
             if payload.clip_index:
                 extra = f"  [clip {payload.clip_index}/{payload.clip_total}]"
             log.append(f"{payload.percent:5.1f}% |{bar:<20}| "
                        f"{payload.stage}: {payload.message}{extra}")
+            yield "\n".join(log[-30:]), *empty
+        elif kind == "pv2":                   # v2 (stage, pct, msg)
+            stage, pct, msg = payload
+            bar = "█" * int(pct / 5)
+            log.append(f"{pct:5.1f}% |{bar:<20}| {stage}: {msg}")
             yield "\n".join(log[-30:]), *empty
         else:
             break
@@ -204,8 +248,19 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
     result = holder["result"]
     ok = [c for c in result.clips if c.status == "ok"]
     failed = [c for c in result.clips if c.status == "failed"]
-    log.append(f"✅ Done — {len(ok)} clip(s) rendered, {len(failed)} failed, "
-               f"{result.goals} goal(s) of {result.moments} moment(s).")
+    if is_v2:
+        log.append(f"✅ Done — {len(ok)} clip(s) rendered, {len(failed)} failed, "
+                   f"{result.goals} goal(s) of {result.windows} event(s).")
+        for c in ok:
+            hook = (c.manifest or {}).get("video_hook_text", "")
+            hero = f"#{c.hero_number}" if c.hero_number is not None else "?"
+            poss = ("/".join(f"{v}%" for v in c.possession_pct.values())
+                    if c.possession_pct else "n/a")
+            log.append(f"   • {c.kind}: hero {hero} ({c.hero_source}), "
+                       f"possession {poss} — “{hook}”")
+    else:
+        log.append(f"✅ Done — {len(ok)} clip(s) rendered, {len(failed)} failed, "
+                   f"{result.goals} goal(s) of {result.moments} moment(s).")
     for c in failed:
         log.append(f"   • clip {c.index} failed at {c.stage_failed}: {c.error}")
 
@@ -267,6 +322,11 @@ def build() -> gr.Blocks:
                         refresh_inputs = gr.Button("↻", scale=1)
                     profile = gr.Dropdown(_profiles(), value="tiktok",
                                           label="Output profile")
+                    engine = gr.Radio(
+                        ["Classic (v1)", "Studio (v2)"], value="Studio (v2)",
+                        label="Engine",
+                        info="Studio v2 = BoT-SORT+CMC reframe, team colours, "
+                             "possession, jersey-number hero lock, LLM director")
                     output_mode = gr.Radio(
                         ["per_clip", "compilation"], value="per_clip",
                         label="Output",
@@ -279,7 +339,18 @@ def build() -> gr.Blocks:
                         use_vision = gr.Checkbox(True, label="GPU telestration + action-aware reframe")
                         telestration = gr.Checkbox(True, label="Draw arrows / spotlight / ball trail")
                         slowmo = gr.Checkbox(True, label="Slow-mo on the key beat")
-                        freeze = gr.Checkbox(True, label="Freeze-zoom call-out intro")
+                        freeze = gr.Checkbox(True, label="Freeze-zoom call-out intro (v1 only)")
+                    with gr.Accordion("Studio v2 options", open=True):
+                        v2_director = gr.Dropdown(
+                            ["heuristic", "gemini", "openai"], value="heuristic",
+                            label="Director (editing manifest)",
+                            info="heuristic = offline; gemini/openai need an API key env var")
+                        v2_team_halos = gr.Checkbox(
+                            True, label="Team-coloured halos (K-means jersey colours)")
+                        v2_jerseys = gr.Checkbox(
+                            True, label="Jersey-number recognition + hero lock by number")
+                        v2_pitch = gr.Checkbox(
+                            False, label="Pitch homography (grass-anchored graphics + metric possession)")
                     with gr.Accordion("Detection tuning", open=False):
                         limit = gr.Slider(0, 30, value=0, step=1,
                                           label="Max clips (0 = all)")
@@ -302,7 +373,8 @@ def build() -> gr.Blocks:
                 render_job,
                 inputs=[video, server_pick, profile, output_mode, target_seconds,
                         use_vision, slowmo, freeze, telestration,
-                        limit, zscore, min_conf, music_vol],
+                        limit, zscore, min_conf, music_vol,
+                        engine, v2_director, v2_team_halos, v2_jerseys, v2_pitch],
                 outputs=[logbox, clip_dd, preview, caption, files],
             )
             refresh_inputs.click(lambda: gr.update(choices=_input_files()),
