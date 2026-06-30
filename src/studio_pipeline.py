@@ -27,6 +27,7 @@ This sits ALONGSIDE the existing src/runner.py (v1) — it does not replace it.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -64,6 +65,9 @@ class StudioClip:
     possession_pct: dict | None = None
     shots: int = 0
     replays: int = 0
+    qa_score: float | None = None
+    qa_issues: list | None = None
+    revisions: int = 0
     stage_failed: str | None = None
     error: str | None = None
 
@@ -215,22 +219,57 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         sc.hero_source = analytics.hero_source
         sc.possession_pct = analytics.possession_share_pct()
 
-        stage = "replan"                    # re-centre on hero + per-shot zoom
-        crop_plan = cam.build_plan(frames, meta, hero_id=analytics.hero_id,
-                                   shots=shots, shot_edits=plan.shots)
+        stage = "render+review"             # render plan -> QA (+critic) -> revise
+        stats = _stats_from(analytics)
+        tele_on = cfg.get("telestration", {}).get("enabled", True)
+        counter = {"n": 0}
 
-        stage = "graphics+reframe"          # ONE pass: world graphics -> CMC crop
-        world = screen = None               #            -> screen HUD (no extra encode)
-        if cfg.get("telestration", {}).get("enabled", True):
-            world, screen = composer.make_annotators(crop_plan, manifest, analytics)
-        reframed = cam.render(clip, crop_plan, str(work / "reframed.mp4"),
-                              annotate_world=world, annotate_screen=screen,
-                              intermediate=True)
+        def render_plan(p) -> str:
+            counter["n"] += 1
+            k = counter["n"]
+            cplan = cam.build_plan(frames, meta, hero_id=analytics.hero_id,
+                                   shots=shots, shot_edits=p.shots)
+            world = screen = None
+            if tele_on:
+                world, screen = composer.make_annotators(cplan, p.to_manifest(),
+                                                         analytics)
+            rf = cam.render(clip, cplan, str(work / f"reframed_{k}.mp4"),
+                            annotate_world=world, annotate_screen=screen,
+                            intermediate=True)
+            outp = str(work / f"render_{k}.mp4")
+            composer.finish(rf, outp, manifest=p.to_manifest(), stats=stats,
+                            beats=p.slowmo_beats)
+            return outp
 
-        stage = "finish"                    # multi-beat slow-mo + premium typography
         final = str(Path(out_dir) / f"{i:02d}_{w.kind}.mp4")
-        composer.finish(reframed, final, manifest=manifest,
-                        stats=_stats_from(analytics), beats=plan.slowmo_beats)
+        qcfg = cfg.get("qa", {})
+        if qcfg.get("enabled", True):
+            from .agents.critic import critique
+            from .agents.llm_client import VisionLLMClient
+            from .agents.review import review_and_revise
+            from .qa.checks import qa_report
+            prof = cfg["_active_profile"]
+            expected = {"width": prof["width"], "height": prof["height"]}
+            if qcfg.get("max_seconds"):
+                expected["max_seconds"] = qcfg["max_seconds"]
+            if qcfg.get("min_seconds"):
+                expected["min_seconds"] = qcfg["min_seconds"]
+            critic_fn = None
+            if qcfg.get("use_critic", True) and VisionLLMClient(cfg).is_configured():
+                critic_fn = lambda path, pl: critique(path, pl, cfg)  # noqa: E731
+            res = review_and_revise(
+                plan, render_fn=render_plan,
+                qa_fn=lambda path: qa_report(path, cfg, expected),
+                cfg=cfg, critic_fn=critic_fn,
+                max_revisions=int(qcfg.get("max_revisions", 1)))
+            os.replace(res.path, final)
+            sc.qa_score = res.score
+            sc.qa_issues = list(getattr(res.qa, "issues", []) or [])
+            sc.revisions = max(0, res.attempts - 1)
+            log.info(f"[studio] clip {i} QA score {res.score:.2f} "
+                     f"({sc.revisions} revision(s)); issues={sc.qa_issues}")
+        else:
+            os.replace(render_plan(plan), final)
 
         stage = "branding"                  # reuse v1 intro/outro/lower-thirds
         try:

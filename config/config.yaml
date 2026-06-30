@@ -274,3 +274,19 @@ possession:
   radius_m: 1.5                  # blueprint: ~1 m; 1.5 m is practical for broadcast
   min_frames: 3                  # blueprint: hold > 3 frames to confirm
   bridge_frames: 3               # tolerate brief detection dropouts within a run
+
+
+# ---- QA + review loop (v3): watch the rendered output, fix, re-render ----
+# The studio renders the Director's EditPlan, runs deterministic QA on the
+# output (black bars / dead frames / loudness / duration), optionally asks the
+# vision Critic "does it look good", and revises the plan up to max_revisions.
+qa:
+  enabled: true
+  max_revisions: 1               # bounded re-renders when QA/critic flag issues
+  pass_score: 0.75               # average check score needed to pass
+  use_critic: true               # also ask the vision-LLM critic (if configured)
+  critic_pass_score: 0.7
+  critic_frames: 8               # output keyframes shown to the critic
+  loudness_tolerance: 3.0        # LUFS tolerance around the target
+  zoom_relax: 0.8                # factor to relax per-shot zoom on crop-jump
+  # min_seconds / max_seconds: optional duration window (unset => no duration gate)

@@ -313,3 +313,36 @@ implemented, mockable and unit-tested on CPU so GPU bring-up is configuration:
 Default `director.backend: heuristic` keeps the studio fully offline and
 behaviour-identical until a VLM endpoint is configured. Still ○ (GPU + real
 match): the VLM's actual editorial quality, ASR accuracy, and the P2 critic loop.
+
+
+---
+
+## Appendix — P2 status (review loop implemented & CPU-verified; critic ○ GPU)
+
+The "watch the output and fix it" loop is implemented and wired:
+
+- **Deterministic QA** — `src/qa/checks.py` `qa_report()` inspects the rendered
+  mp4: streams/resolution, black-bar/letterbox detection, dead/frozen frames,
+  integrated loudness (ffmpeg `ebur128` vs target), duration window. Returns a
+  machine-readable `QAReport` (per-check score + issue tags + pass/fail).
+  `tests/test_qa.py` verifies clean passes and that pillarbox/black/over-length
+  clips are flagged.
+- **Critic agent** — `src/agents/critic.py` `critique()` samples OUTPUT
+  keyframes and asks the vision-LLM for a score + issue tags + concrete
+  suggestions (reduce_zoom/widen/trim_slowmo/drop_shots). No-op pass when no
+  model is configured (trusts QA). Reply coercion unit-tested.
+- **Review loop** — `src/agents/review.py`: `apply_corrections()` maps QA+Critic
+  issues to deterministic EditPlan edits (relax zoom on crop-jump, letterbox->
+  crop, trim slow-mo when too long, drop rejected shots); `review_and_revise()`
+  renders -> judges -> corrects -> re-renders up to `qa.max_revisions`, keeping
+  the best result. Both unit-tested with fakes (verified the loop revises
+  zoom 2.0 until QA passes).
+- **Studio integration** — `studio_pipeline._process` now renders the plan
+  through `review_and_revise` (render closure rebuilds the crop per revision),
+  records `qa_score`/`qa_issues`/`revisions` on the clip, and `os.replace`s the
+  best render into the final path. New `qa.*` config block; default
+  `max_revisions: 1`, critic auto-enabled only when a vision endpoint is set.
+
+Still ○ (GPU + real match): the Critic's actual visual judgement and the
+end-to-end multi-revision quality on real footage. P3 (action spotting,
+cross-shot Re-ID, music beat-sync) remains.

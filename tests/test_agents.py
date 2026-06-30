@@ -163,6 +163,70 @@ def test_plan_edit_falls_back_on_error_and_when_unconfigured():
     print("  ✓ plan_edit: falls back to heuristic on error / unconfigured / default")
 
 
+def test_critic_coerce_and_no_backend():
+    from src.agents.critic import CriticReport, _coerce, critique
+    # mock reply coercion: unknown issues filtered, suggestions cleaned, ok=False
+    rep = _coerce({"score": 0.4, "issues": ["crop_jump", "aliens"],
+                   "notes": "ball leaves frame",
+                   "suggestions": {"reduce_zoom": True, "drop_shots": [1, "x"]}},
+                  source="vllm", cfg={})
+    assert rep.ok is False and rep.score == 0.4
+    assert rep.issues == ["crop_jump"]                       # 'aliens' dropped
+    assert rep.suggestions["reduce_zoom"] is True and rep.suggestions["drop_shots"] == [1]
+    # no configured backend -> no-op pass (never touches the file)
+    out = critique("nonexistent.mp4", plan=None, cfg={})
+    assert out.ok is True and out.source == "none"
+    print("  ✓ critic: reply coerced (unknown issues dropped); no backend -> no-op pass")
+
+
+def test_apply_corrections_variants():
+    from src.agents.critic import CriticReport
+    from src.agents.editplan import EditPlan, ShotEdit, SlowmoBeat
+    from src.agents.review import apply_corrections
+    from src.qa.checks import QAReport
+    plan = EditPlan(
+        shots=[ShotEdit(0, zoom=1.0, framing="letterbox_wide"),
+               ShotEdit(1, zoom=1.5)],
+        slowmo_beats=[SlowmoBeat(2.0, 8.0, 0.4)])
+    qa = QAReport(score=0.4, passed=False, issues=["letterbox", "too_long"])
+    crit = CriticReport(ok=False, score=0.5, issues=["crop_jump"],
+                        suggestions={"drop_shots": [1]})
+    p2, changed = apply_corrections(plan, qa, crit, cfg={})
+    assert changed
+    assert p2.shots[0].framing == "crop_follow"      # letterbox -> crop
+    assert p2.shots[1].zoom < 1.5                    # crop_jump relaxes zoom
+    assert p2.shots[1].keep is False                 # critic dropped shot 1
+    assert p2.slowmo_beats[0].end < 8.0              # too_long trims slow-mo
+    print("  ✓ apply_corrections: letterbox/zoom/slowmo/drop-shot edits applied")
+
+
+def test_review_loop_revises_until_pass():
+    from src.agents.editplan import EditPlan, ShotEdit
+    from src.agents.review import review_and_revise
+    from src.qa.checks import QAReport
+    plan = EditPlan(shots=[ShotEdit(0, zoom=2.0)], source="heuristic")
+    rendered_zoom: list[float] = []
+
+    def render_fn(p):
+        rendered_zoom.append(max((s.zoom for s in p.shots), default=1.0))
+        return f"out_{len(rendered_zoom)}.mp4"
+
+    def qa_fn(path):
+        z = rendered_zoom[-1]
+        if z > 1.3:
+            return QAReport(score=0.5, passed=False, issues=["crop_jump"])
+        return QAReport(score=0.95, passed=True, issues=[])
+
+    res = review_and_revise(plan, render_fn=render_fn, qa_fn=qa_fn,
+                            cfg={"qa": {"zoom_relax": 0.6}}, max_revisions=3)
+    assert res.qa.passed, (res.score, [s.zoom for s in res.plan.shots])
+    assert max(s.zoom for s in res.plan.shots) <= 1.3
+    assert res.attempts >= 2                          # at least one revision
+    print(f"  ✓ review loop: revised zoom 2.0 -> "
+          f"{max(s.zoom for s in res.plan.shots)} until QA passed "
+          f"({res.attempts} attempts)")
+
+
 def main() -> int:
     print("agent-layer tests (no GPU/network)")
     for t in (test_editplan_coerce_clamps_and_defaults,
@@ -170,7 +234,10 @@ def main() -> int:
               test_heuristic_plan_offline,
               test_parse_json_tolerant,
               test_plan_edit_uses_mock_vision_client,
-              test_plan_edit_falls_back_on_error_and_when_unconfigured):
+              test_plan_edit_falls_back_on_error_and_when_unconfigured,
+              test_critic_coerce_and_no_backend,
+              test_apply_corrections_variants,
+              test_review_loop_revises_until_pass):
         t()
     print("\nALL AGENT TESTS PASSED ✅")
     return 0
