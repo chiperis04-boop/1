@@ -242,6 +242,42 @@ def process(match_url: str, profile: str = "tiktok", mode: str = "per_clip"):
 # manifest; otherwise it uses the offline heuristic director.
 # --------------------------------------------------------------------------- #
 @app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,
+              timeout=6 * 60 * 60)
+def studio_local(name: str = "4.mp4", profile: str = "tiktok", limit: int = 0):
+    """Run the v2 Studio on a file ALREADY uploaded to the fhs-input Volume.
+
+    Server-side and independent of the browser/`modal serve` session, with a
+    long timeout — the right way to process a full match:
+
+        modal run modal_app.py::studio_local --name 4.mp4 --limit 3
+        modal run modal_app.py::studio_local --name 4.mp4            # all events
+
+    `--limit N` renders only the N highest-confidence events (great for a quick
+    first pass before committing to a whole 100-minute match).
+    """
+    import os
+    import sys
+    sys.path.insert(0, REMOTE)
+    os.chdir(REMOTE)
+
+    local = os.path.join("input", name)
+    if not os.path.exists(local):
+        raise FileNotFoundError(
+            f"{name} not found on the fhs-input Volume. Upload it first:\n"
+            f"  modal volume put fhs-input <localfile> /{name}")
+
+    from src.studio_pipeline import run_studio
+    overrides = _vlm_overrides() or None
+    result = run_studio(local, profile=profile, limit=limit, overrides=overrides)
+    output_vol.commit()
+    ok = sum(c.status == "ok" for c in result.clips)
+    print(f"studio_local status={result.status} events={result.windows} "
+          f"goals={result.goals} finished={ok}/{len(result.clips)} "
+          f"director={'vllm' if overrides else 'heuristic'} -> output/{name.rsplit('.', 1)[0]}/")
+    return result.to_dict()
+
+
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,
               timeout=2 * 60 * 60)
 def studio(match_url: str, profile: str = "tiktok"):
     import os
