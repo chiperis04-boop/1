@@ -63,6 +63,62 @@ Open it — that's the same WebUI: **upload a match, pick options, Render**.
 - `@modal.concurrent(max_inputs=...)` — concurrent UI sessions per container
   (heavy render concurrency is separately gated by Gradio's `.queue()`).
 
+## 5. (v3) Enable the AI Director + Critic — serve a vision-LLM with vLLM
+
+The frame-aware Director and the review-loop Critic need a multimodal model.
+`modal_app.py` includes an **open-source** vision-LLM served by **vLLM** as an
+OpenAI-compatible endpoint (default `Qwen/Qwen2-VL-7B-Instruct`, fits one L40S).
+By default the studio runs the **offline heuristic** Director; enabling the VLM
+is purely additive.
+
+```bash
+# 5.1 one-time: cache the model weights on the fhs-models Volume
+modal run modal_app.py::setup_vlm
+
+# 5.2 deploy (this now also serves the /vlm endpoint next to the WebUI)
+modal deploy modal_app.py
+# note the printed vlm URL, e.g. https://<you>--football-highlight-studio-vlm.modal.run
+
+# 5.3 wire the studio/UI to the endpoint, then redeploy
+modal secret create fhs-vlm FHS_VLM_URL=https://<you>--football-highlight-studio-vlm.modal.run
+modal deploy modal_app.py
+```
+
+How it's consumed:
+- **Headless** `studio` auto-picks it up via `FHS_VLM_URL` (`_vlm_overrides()`
+  sets `director.backend=openai` + `base_url`), so a run uses the real Director:
+  ```bash
+  modal run modal_app.py::studio --match-url "https://.../match.mp4"
+  # logs show: director=vllm
+  ```
+- **WebUI**: the `web` function exports `OPENAI_BASE_URL` from `FHS_VLM_URL`. To
+  actually switch the UI path on, set in `config/config.yaml`:
+  ```yaml
+  director:
+    backend: openai            # use the served vision-LLM (was: heuristic)
+    model: qwen2-vl
+  qa:
+    use_critic: true           # also run the review-loop Critic on the output
+  ```
+  (`base_url` is taken from `OPENAI_BASE_URL`/the endpoint; no secret in git.)
+
+Knobs:
+- `VLM_MODEL` (top of `modal_app.py`) — swap the brain. A bigger model
+  (`Qwen/Qwen2-VL-72B-Instruct-AWQ`) wants most of the L40S to itself; keep the
+  7B for co-residence headroom. `FHS_VLM_MODEL` overrides the served name.
+- The Director runs **once per clip** (dozens of calls/match), the Critic once
+  per render attempt — affordable on a 24/7 L40S; cost is irrelevant per the
+  brief but latency adds a little per clip.
+- Everything degrades gracefully: if the endpoint is down or unset, the studio
+  falls back to the heuristic Director and QA-only review — it never fails a
+  render because the brain is unavailable.
+
+### Not executed in this repo's sandbox
+The `vlm`/`setup_vlm` functions and the wiring are written against the
+documented Modal + vLLM APIs but were **not run here** (no GPU/Modal account in
+the build sandbox). Validate with `modal serve modal_app.py` and a `setup_vlm`
+run first; pin `vllm`/model revisions once confirmed on the L40S.
+
 ## Important Modal-specific caveats
 
 1. **Big match uploads.** Browser → web-endpoint upload works for small/medium

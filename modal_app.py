@@ -75,6 +75,83 @@ except TypeError:                          # older Modal SDK without `required`
 
 
 # --------------------------------------------------------------------------- #
+# Vision-LLM (the Director / Critic "brain"), served as an OpenAI-compatible
+# endpoint by vLLM on its own GPU container. Open-source, runs 24/7 on an L40S.
+#   modal run   modal_app.py::setup_vlm   # one-time: cache the weights on Volume
+#   modal deploy modal_app.py             # serves /vlm alongside the WebUI
+# Then point the studio at it (see _vlm_overrides + DEPLOY_MODAL.md):
+#   modal secret create fhs-vlm FHS_VLM_URL=https://<you>--...-vlm.modal.run
+# Default model fits one L40S (48 GB) comfortably; swap via the FHS_VLM_MODEL env.
+# --------------------------------------------------------------------------- #
+VLM_MODEL = "Qwen/Qwen2-VL-7B-Instruct"    # open-source multimodal Director brain
+VLM_SERVED_NAME = "qwen2-vl"
+
+vllm_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install("vllm>=0.6.3", "qwen-vl-utils", "huggingface_hub>=0.24,<1.0")
+    .env({"HF_HOME": f"{REMOTE}/models/cache/hf",
+          "HF_HUB_CACHE": f"{REMOTE}/models/cache/hf/hub",
+          "VLLM_DO_NOT_TRACK": "1"})
+)
+
+
+@app.function(image=vllm_image, volumes={f"{REMOTE}/models": models_vol},
+              secrets=HF_SECRET, timeout=60 * 60)
+def setup_vlm():
+    """One-time: download the vision-LLM weights onto the models Volume so the
+    always-on server has zero cold-download."""
+    from huggingface_hub import snapshot_download
+    path = snapshot_download(VLM_MODEL)
+    models_vol.commit()
+    print(f"vLLM model cached: {VLM_MODEL} -> {path}")
+    return path
+
+
+@app.function(image=vllm_image, gpu=GPU, volumes={f"{REMOTE}/models": models_vol},
+              secrets=HF_SECRET, timeout=24 * 60 * 60, scaledown_window=20 * 60)
+@modal.concurrent(max_inputs=16)           # vLLM batches requests internally
+@modal.web_server(8000, startup_timeout=15 * 60)
+def vlm():
+    """OpenAI-compatible vision endpoint (vLLM serving Qwen2-VL).
+
+    Exposes /v1/chat/completions with image_url content — exactly what
+    src/agents/llm_client.VisionLLMClient (backend='openai') speaks."""
+    import shlex
+    import subprocess
+    cmd = (
+        "python -m vllm.entrypoints.openai.api_server "
+        f"--model {VLM_MODEL} --served-model-name {VLM_SERVED_NAME} "
+        "--host 0.0.0.0 --port 8000 "
+        "--max-model-len 8192 --limit-mm-per-prompt image=16 "
+        "--gpu-memory-utilization 0.92 --trust-remote-code"
+    )
+    subprocess.Popen(shlex.split(cmd))
+
+
+def _vlm_overrides() -> dict:
+    """Director/Critic config overrides pointing at the deployed vLLM endpoint,
+    enabled only when FHS_VLM_URL is set (else {} -> offline heuristic)."""
+    import os
+    url = os.environ.get("FHS_VLM_URL")
+    if not url:
+        return {}
+    base = url.rstrip("/")
+    if not base.endswith("/v1"):
+        base += "/v1"
+    return {"director": {"backend": "openai", "base_url": base,
+                         "model": os.environ.get("FHS_VLM_MODEL", VLM_SERVED_NAME)}}
+
+
+# Secret carrying FHS_VLM_URL (the deployed vLLM endpoint) for worker functions.
+# Create after deploying once you know the /vlm URL:
+#   modal secret create fhs-vlm FHS_VLM_URL=https://<you>--...-vlm.modal.run
+try:
+    VLM_SECRET = HF_SECRET + [modal.Secret.from_name("fhs-vlm", required=False)]
+except TypeError:
+    VLM_SECRET = HF_SECRET
+
+
+# --------------------------------------------------------------------------- #
 # One-time: populate the models Volume (run: modal run modal_app.py::setup_models)
 # Downloads ALL models for 100% offline operation: YOLO player/ball/pitch +
 # faster-whisper + EasyOCR + COCO fallback, then prints a size manifest so you
@@ -104,7 +181,7 @@ def setup_models():
 #   - @modal.concurrent: serve several UI sessions from one container (heavy
 #     render concurrency is separately gated by Gradio's .queue()).
 # --------------------------------------------------------------------------- #
-@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=HF_SECRET,
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,
               timeout=2 * 60 * 60, scaledown_window=300)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
@@ -113,6 +190,14 @@ def web():
     import sys
     sys.path.insert(0, REMOTE)
     os.chdir(REMOTE)                       # so 'input'/'output' resolve to the Volume
+
+    # If a vLLM endpoint is wired (FHS_VLM_URL), expose it as OPENAI_BASE_URL so
+    # a config with director.backend=openai / qa.use_critic uses the Director +
+    # Critic. Without it the studio stays on the offline heuristic.
+    vurl = os.environ.get("FHS_VLM_URL")
+    if vurl:
+        base = vurl.rstrip("/")
+        os.environ["OPENAI_BASE_URL"] = base if base.endswith("/v1") else base + "/v1"
 
     from fastapi import FastAPI
     from gradio.routes import mount_gradio_app
@@ -156,7 +241,7 @@ def process(match_url: str, profile: str = "tiktok", mode: str = "per_clip"):
 # Set director.backend=gemini via the huggingface/secret env if you want the LLM
 # manifest; otherwise it uses the offline heuristic director.
 # --------------------------------------------------------------------------- #
-@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=HF_SECRET,
+@app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,
               timeout=2 * 60 * 60)
 def studio(match_url: str, profile: str = "tiktok"):
     import os
@@ -170,9 +255,11 @@ def studio(match_url: str, profile: str = "tiktok"):
     urllib.request.urlretrieve(match_url, local)
 
     from src.studio_pipeline import run_studio
-    result = run_studio(local, profile=profile)
+    overrides = _vlm_overrides() or None   # use the Director VLM if wired, else heuristic
+    result = run_studio(local, profile=profile, overrides=overrides)
     output_vol.commit()
     ok = sum(c.status == "ok" for c in result.clips)
     print(f"studio status={result.status} events={result.windows} "
-          f"goals={result.goals} finished={ok}/{len(result.clips)}")
+          f"goals={result.goals} finished={ok}/{len(result.clips)} "
+          f"director={'vllm' if overrides else 'heuristic'}")
     return result.to_dict()
