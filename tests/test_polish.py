@@ -171,6 +171,48 @@ def test_slowmo_interpolation_adds_frames(tmp):
           "(smoother motion, less judder)")
 
 
+def test_single_pass_graphics_reframe(tmp):
+    """P0.3+P0.4+P0.5: one pass does world-graphics -> CMC crop -> screen HUD,
+    piped into a single encode (no mp4v, no separate graphics encode)."""
+    import cv2
+    from src.render.composer import Composer
+    from src.tracking.cameraman import Cameraman, CropPlan, FrameTrack
+
+    clip = tmp / "clip.mp4"
+    _make_clip(clip, w=640, h=360, secs=2, fps=30, with_audio=True)
+    cap = cv2.VideoCapture(str(clip))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 60)
+    cap.release()
+
+    src_w, src_h, out_w, out_h = 640, 360, 216, 384
+    crop_h = src_h
+    crop_w = int(crop_h * 9 / 16)              # 202 (even)
+    frames = [FrameTrack(idx=i,
+                         players=[{"id": 1, "cls": 0,
+                                   "xyxy": [300, 150, 340, 250],
+                                   "center": [320, 200]}],
+                         ball={"xyxy": [317, 197, 323, 203], "center": [320, 200]})
+              for i in range(n)]
+    boxes = [(int((src_w - crop_w) / 2), 0) for _ in range(n)]
+    plan = CropPlan(src_w=src_w, src_h=src_h, fps=30.0, crop_w=crop_w, crop_h=crop_h,
+                    out_w=out_w, out_h=out_h, hero_id=1, boxes=boxes, frames=frames)
+    cfg = {"render": {"encoder": "libx264", "fps": 30},
+           "telestration": {"enabled": True, "team_halos": False,
+                            "ball_trail": True, "spotlight_scorer": True},
+           "_active_profile": {"width": out_w, "height": out_h}}
+    cam = Cameraman(cfg)
+    comp = Composer(cfg, {})
+    world, screen = comp.make_annotators(plan, manifest=None, analytics=None)
+    out = str(tmp / "reframed.mp4")
+    cam.render(str(clip), plan, out, annotate_world=world, annotate_screen=screen,
+               intermediate=True)
+    v, a = _probe_streams(out)
+    assert len(v) == 1 and len(a) == 1, (len(v), len(a))
+    assert (int(v[0]["width"]), int(v[0]["height"])) == (out_w, out_h)
+    assert v[0]["codec_name"] == "h264"
+    print("  ✓ single-pass graphics+CMC reframe: 1V+1A @9:16, one encode (no mp4v)")
+
+
 # --------------------------------------------------------------------------- #
 def main() -> int:
     ff.ensure_tools()
@@ -182,6 +224,7 @@ def main() -> int:
         test_compose_audio_ducking_and_loudnorm(tmp)
         test_caption_safe_zone()
         test_slowmo_interpolation_adds_frames(tmp)
+        test_single_pass_graphics_reframe(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("\nALL POLISH TESTS PASSED ✅")

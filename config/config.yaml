@@ -165,6 +165,18 @@ telestration:
   line_thickness: 4
   team_halos: true              # colour every player's halo in their club colour
                                 # (from vision.teams); hero gets a thicker ring
+  halo_hold_frames: 6           # keep the hero halo for N frames if detection drops
+  halo_smooth: 0.5              # EMA factor for the hero halo box (anti-flicker)
+
+# ---- shot segmentation (broadcast camera cuts) ----
+# The studio plans tracking + crop PER SHOT so the 9:16 camera resets at every
+# cut instead of gliding across it, and flags literal-duplicate replay inserts.
+shots:
+  enabled: true
+  threshold: 27.0               # PySceneDetect ContentDetector sensitivity
+  min_seconds: 0.6              # merge shorter shots into their neighbour
+  detect_replays: true          # flag near-identical repeated shots (conservative)
+  replay_correlation: 0.97      # HSV-hist correlation to call a shot a duplicate
 
 edit:
   reframe:

@@ -189,6 +189,24 @@ def test_kalman_rts_is_zero_phase():
           f"causal lags to {causal_peak}")
 
 
+def test_per_shot_smoothing_resets_at_cut():
+    """With shot segments, the camera path must reset at the cut (sharp step)
+    instead of gliding across it (the v2 lurch bug)."""
+    n = 120
+    xs = np.concatenate([np.full(60, 100.0), np.full(60, 900.0)])  # hard cut @60
+    ys = np.full(n, 500.0)
+    cfg = {"kalman_process_noise": 2.0, "kalman_measurement_noise": 120.0,
+           "smoothing": 0.85}
+    whole, _ = _kalman_smooth(xs, ys, 30.0, cfg)                    # one path
+    seg, _ = _kalman_smooth(xs, ys, 30.0, cfg, segments=[(0, 60), (60, 120)])
+    # segmented: each shot pinned near its own value -> big step at the boundary
+    assert seg[59] < 300 and seg[60] > 700, (seg[59], seg[60])
+    # whole-clip path bleeds the cut -> its boundary step is far smaller
+    assert (seg[60] - seg[59]) > (whole[60] - whole[59]) * 3
+    print(f"  ✓ per-shot smoothing: step@cut seg={seg[60]-seg[59]:.0f} "
+          f"vs whole-clip {whole[60]-whole[59]:.0f} (no cross-cut glide)")
+
+
 # --------------------------------------------------------------------------- #
 # 3) possession: per-frame holders -> confirmed runs + bridging + share
 # --------------------------------------------------------------------------- #
@@ -282,6 +300,20 @@ def test_hero_resolution_priority():
 # --------------------------------------------------------------------------- #
 # 6) teams: club-colour lookup per track
 # --------------------------------------------------------------------------- #
+def test_hero_halo_persistence():
+    """The hero halo must persist across short detection gaps (no flicker) and
+    then release after `halo_hold_frames`."""
+    from src.render.composer import _smooth_hero
+    tele = {"halo_hold_frames": 4, "halo_smooth": 0.0}
+    state: dict = {}
+    assert _smooth_hero(_frame(0, [_player(7, 100, 100)]), 7, state, tele) is not None
+    persisted = [_smooth_hero(_frame(i, [_player(9, 500, 500)]), 7, state, tele)
+                 for i in range(1, 6)]            # hero 7 absent for 5 frames
+    assert all(p is not None for p in persisted[:4]), persisted
+    assert persisted[4] is None                   # released after hold=4
+    print("  ✓ hero halo persists across short gaps then releases (no flicker)")
+
+
 def test_team_colors():
     ta = TeamAssignment(team_of={7: 0, 9: 1}, colors={0: (255, 0, 0), 1: (0, 0, 255)})
     assert ta.color_for_track(7) == (255, 0, 0)
@@ -335,6 +367,7 @@ def main() -> int:
         test_kalman_smoothing_reduces_jitter,
         test_kalman_smooth_ema_fallback,
         test_kalman_rts_is_zero_phase,
+        test_per_shot_smoothing_resets_at_cut,
         test_focus_points_fallback_chain,
         test_geometric_hero_vote,
         test_possession_runs_and_bridge,
@@ -342,6 +375,7 @@ def main() -> int:
         test_number_from_description,
         test_jersey_track_for_number_prefers_confidence,
         test_hero_resolution_priority,
+        test_hero_halo_persistence,
         test_team_colors,
         test_pick_key_player_restricts_to_attacking_team,
         test_scout_dedupe_merges_cluster,

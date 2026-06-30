@@ -241,3 +241,38 @@ P0 is fully implementable & verifiable in this environment now. P1–P3 need the
 L40S + local models to validate, but all the plumbing (schemas, client, executor,
 QA) is built and unit-tested on CPU first so that GPU bring-up is configuration,
 not new code.
+
+
+---
+
+## Appendix — P0 status (implemented & CPU-verified)
+
+Done in this pass (deterministic, no GPU needed; new/updated tests all green):
+
+- **Shot segmentation** — `src/perception/shots.py` (`segment_shots` via
+  PySceneDetect, `frame_segments` exact tiling, graceful single-shot fallback).
+  `tests/test_shots.py`.
+- **Per-shot crop reset** — `cameraman._kalman_smooth(..., segments=)` smooths
+  each shot independently; `build_plan(..., shots=)`. Verified: step-at-cut 800
+  vs 10 for whole-clip → no cross-cut glide (`tests/test_studio.py`).
+- **Re-encode reduction** — `ff.venc_args(..., intermediate=True)` visually-
+  lossless internal passes; **graphics merged INTO the crop pass**
+  (`cameraman.render(annotate_world=, annotate_screen=)` + `composer.make_annotators`),
+  removing a whole encode generation. World graphics drawn pre-crop, HUD
+  (possession plate) drawn post-crop → fixes HUD placement.
+  `tests/test_polish.py::test_single_pass_graphics_reframe`.
+- **Telestration anti-flicker** — `composer._smooth_hero` persists + EMA-smooths
+  the hero halo across short detection gaps (`telestration.halo_hold_frames`,
+  `halo_smooth`). `tests/test_studio.py::test_hero_halo_persistence`.
+- **Replay flag (conservative)** — `mark_duplicate_shots` flags literal-duplicate
+  shots; recorded per clip (`StudioClip.replays`). Semantic replay handling
+  (other-angle / slow-mo, and physically cutting them out) is deferred to the
+  Director (P1) which sets `cut_in/out` — physically excising replays mid-clip
+  would break A/V sync, so P0 only flags.
+- **Studio integration** — `studio_pipeline._process` now: segment shots →
+  per-shot tracking/crop → single-pass graphics+reframe → slow-mo+typography.
+  New config block `shots:` and `telestration.halo_*`.
+
+Not yet done (still ○, needs the L40S + local models): P1 (Director agent +
+EditPlan + perception bundle), P2 (QA + critic loop), P3 (action spotting,
+cross-shot Re-ID, music sync).

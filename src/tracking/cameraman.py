@@ -96,9 +96,14 @@ class Cameraman:
             return self._track_roboflow(clip_path)
         return self._track_ultralytics(clip_path)
 
-    def build_plan(self, frames, meta, hero_id: int | None = None) -> CropPlan:
-        """Plan the smoothed 9:16 crop around an explicit hero track id."""
-        return self._plan_from_frames(frames, meta, hero_hint=hero_id)
+    def build_plan(self, frames, meta, hero_id: int | None = None,
+                   shots=None) -> CropPlan:
+        """Plan the smoothed 9:16 crop around an explicit hero track id.
+
+        `shots` (optional list of perception.Shot) makes the crop path smooth
+        each shot INDEPENDENTLY so the virtual camera resets at every broadcast
+        cut instead of gliding across it."""
+        return self._plan_from_frames(frames, meta, hero_hint=hero_id, shots=shots)
 
     # --- Ultralytics BoT-SORT with GMC (default) -------------------------- #
     def _track_ultralytics(self, clip_path: str):
@@ -218,7 +223,8 @@ class Cameraman:
         return frames, {"fps": fps, "w": w, "h": h}
 
     # ------------------------------------------------------------- planning
-    def _plan_from_frames(self, frames, meta, hero_hint: int | None = None):
+    def _plan_from_frames(self, frames, meta, hero_hint: int | None = None,
+                          shots=None):
         w, h, fps = meta["w"], meta["h"], meta["fps"]
         aspect = self.cfg.get("edit", {}).get("reframe", {}).get("target_aspect", "9:16")
         aw, ah = (int(x) for x in aspect.split(":"))
@@ -228,9 +234,15 @@ class Cameraman:
         hero_id = hero_hint if hero_hint is not None else _pick_hero(frames)
         focus = _focus_points(frames, hero_id, w, h)
 
+        # per-shot smoothing segments (reset the camera at every cut)
+        segments = None
+        if shots:
+            from ..perception.shots import frame_segments
+            segments = frame_segments(shots, len(frames))
+
         # Kalman-smoothed camera path (constant-velocity); EMA fallback
         cx, cy = _kalman_smooth(focus[:, 0], focus[:, 1],
-                                fps=fps, cfg=self.t)
+                                fps=fps, cfg=self.t, segments=segments)
         half_w, half_h = crop_w / 2.0, crop_h / 2.0
         cx = np.clip(cx, half_w, w - half_w)
         cy = np.clip(cy, half_h, h - half_h)
@@ -268,29 +280,41 @@ class Cameraman:
         return str(d)
 
     # --------------------------------------------------------------- render
-    def render(self, clip_path: str, plan: CropPlan, out_path: str) -> str:
+    def render(self, clip_path: str, plan: CropPlan, out_path: str,
+               annotate_world=None, annotate_screen=None,
+               intermediate: bool = False) -> str:
         """Crop every frame to its planned window and resize to the target
         9:16 profile, then mux the original audio back (audio-safe).
 
+        Optional annotators merge graphics into THIS pass (one fewer encode):
+          * annotate_world(frame, idx) runs on the ORIGINAL frame before the crop
+            (pitch-space halos/trail),
+          * annotate_screen(frame, idx) runs on the cropped OUTPUT frame
+            (screen-space HUD like the possession plate).
         Frames are piped straight into a single H.264 encode (no lossy mp4v
-        intermediate), and the upscaled crop uses Lanczos for crispness."""
+        intermediate); the upscaled crop uses Lanczos for crispness."""
         import cv2
 
         cap = cv2.VideoCapture(clip_path)
         encoder = ff.pick_encoder(self.cfg.get("render", {}).get("encoder", "libx264"))
         sink = ff.RawFrameSink(out_path, plan.out_w, plan.out_h, plan.fps,
-                               encoder, audio_src=clip_path)
+                               encoder, audio_src=clip_path,
+                               intermediate=intermediate)
         idx = 0
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
+            if annotate_world is not None:
+                frame = annotate_world(frame, idx)       # pitch-space, pre-crop
             x0, y0, cw, ch = plan.box_at(idx)
             x0 = max(0, min(x0, plan.src_w - cw))
             y0 = max(0, min(y0, plan.src_h - ch))
             crop = frame[y0:y0 + ch, x0:x0 + cw]
             crop = cv2.resize(crop, (plan.out_w, plan.out_h),
                               interpolation=cv2.INTER_LANCZOS4)
+            if annotate_screen is not None:
+                crop = annotate_screen(crop, idx)        # HUD-space, post-crop
             sink.write(crop)
             idx += 1
         cap.release()
@@ -380,12 +404,40 @@ def _focus_points(frames, hero_id, w, h) -> np.ndarray:
     return np.array(pts, dtype=np.float64) if pts else np.array([[w / 2, h / 2]])
 
 
-def _kalman_smooth(xs: np.ndarray, ys: np.ndarray, fps: float, cfg: dict):
+def _kalman_smooth(xs: np.ndarray, ys: np.ndarray, fps: float, cfg: dict,
+                   segments=None):
     """Constant-velocity Kalman smoothing of the focus path in x and y.
 
-    Falls back to a causal exponential moving average if anything goes wrong.
-    The process/measurement noise ratio controls how 'lazy' the camera is.
+    If `segments` (list of (start,end) frame ranges, one per shot) is given,
+    each shot is smoothed INDEPENDENTLY so the camera resets at every broadcast
+    cut instead of gliding across it. Falls back to a causal EMA per segment if
+    anything goes wrong. The process/measurement noise ratio controls how 'lazy'
+    the camera is.
     """
+    n = len(xs)
+    if n == 0:
+        return xs, ys
+    segs = segments if segments else [(0, n)]
+    cx = np.empty(n, dtype=np.float64)
+    cy = np.empty(n, dtype=np.float64)
+    last = 0
+    for a, b in segs:
+        a = max(0, min(a, n))
+        b = max(a, min(b, n))
+        if b <= a:
+            continue
+        sx, sy = _smooth_one(xs[a:b], ys[a:b], fps, cfg)
+        cx[a:b] = sx
+        cy[a:b] = sy
+        last = b
+    if last < n:                      # safety: cover any gap with the tail value
+        sx, sy = _smooth_one(xs[last:n], ys[last:n], fps, cfg)
+        cx[last:n] = sx
+        cy[last:n] = sy
+    return cx, cy
+
+
+def _smooth_one(xs: np.ndarray, ys: np.ndarray, fps: float, cfg: dict):
     try:
         q = float(cfg.get("kalman_process_noise", 2.0))
         r = float(cfg.get("kalman_measurement_noise", 120.0))

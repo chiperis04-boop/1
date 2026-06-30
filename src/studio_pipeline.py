@@ -61,6 +61,8 @@ class StudioClip:
     hero_number: int | None = None
     hero_source: str | None = None
     possession_pct: dict | None = None
+    shots: int = 0
+    replays: int = 0
     stage_failed: str | None = None
     error: str | None = None
 
@@ -177,9 +179,16 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
     try:
         work = ensure_dir(Path(out_dir) / "work" / f"clip_{i:02d}")
 
+        stage = "shots"                     # segment broadcast cuts in this clip
+        from .perception.shots import mark_duplicate_shots, segment_shots
+        shots = mark_duplicate_shots(clip, segment_shots(clip, cfg), cfg)
+        sc.shots = len(shots)
+        sc.replays = sum(s.is_replay for s in shots)
+
         stage = "track"                     # BoT-SORT + CMC (once)
         frames, meta = cam.track_only(clip)
-        plan0 = cam.build_plan(frames, meta)   # geometric hero (director + fallback)
+        # geometric hero + crop reset per shot (no glide across cuts)
+        plan0 = cam.build_plan(frames, meta, shots=shots)
 
         stage = "director"                  # LLM/heuristic editing manifest
         manifest = generate_manifest(clip, window=w, cfg=cfg, track=plan0)
@@ -198,16 +207,15 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         sc.possession_pct = analytics.possession_share_pct()
 
         stage = "replan"                    # re-centre the crop on the real hero
-        plan = cam.build_plan(frames, meta, hero_id=analytics.hero_id)
+        plan = cam.build_plan(frames, meta, hero_id=analytics.hero_id, shots=shots)
 
-        stage = "graphics"                  # team-colour halos + #number + possession
-        annotated = clip
+        stage = "graphics+reframe"          # ONE pass: world graphics -> CMC crop
+        world = screen = None               #            -> screen HUD (no extra encode)
         if cfg.get("telestration", {}).get("enabled", True):
-            annotated = composer.draw_graphics(
-                clip, str(work / "gfx.mp4"), plan, manifest, homography, analytics)
-
-        stage = "reframe"                   # CMC-smoothed crop to 9:16
-        reframed = cam.render(annotated, plan, str(work / "reframed.mp4"))
+            world, screen = composer.make_annotators(plan, manifest, analytics)
+        reframed = cam.render(clip, plan, str(work / "reframed.mp4"),
+                              annotate_world=world, annotate_screen=screen,
+                              intermediate=True)
 
         stage = "finish"                    # slow-mo + premium typography
         final = str(Path(out_dir) / f"{i:02d}_{w.kind}.mp4")

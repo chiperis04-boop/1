@@ -85,33 +85,58 @@ class Composer:
         return out_path
 
     # -------------------------------------------------------- 1) graphics
-    def draw_graphics(self, clip_path, out_path, track, manifest, homography,
-                      analytics=None):
-        import cv2
+    def make_annotators(self, track, manifest, analytics=None):
+        """Build two per-frame annotators used by the single-pass renderer:
 
+          * world(frame, idx)  — pitch/world-space graphics (player halos, ball
+            trail) drawn in the ORIGINAL clip pixels, BEFORE the 9:16 crop.
+          * screen(frame, idx) — HUD/screen-space graphics (the POSSESSION
+            plate) drawn AFTER the crop, in OUTPUT pixels, so it sits correctly
+            in the 9:16 frame instead of being cropped away.
+
+        Merging annotation into the crop pass removes a whole lossy re-encode
+        generation, and splitting world/screen fixes HUD positioning.
+        """
         tele = self.cfg.get("telestration", {})
         hero_id = (getattr(analytics, "hero_id", None)
                    if analytics is not None else None) or self._hero_id(track, manifest)
-
         frames = getattr(track, "frames", [])
+        ball_trail: list[tuple[float, float]] = []
+        hero_state: dict = {}
+
+        def world(frame, idx):
+            ft = frames[idx] if idx < len(frames) else None
+            return self._annotate_frame(frame, ft, hero_id, ball_trail, tele,
+                                        analytics, hero_state)
+
+        def screen(frame, idx):
+            ft = frames[idx] if idx < len(frames) else None
+            self._draw_possession_plate(frame, ft, analytics)
+            return frame
+
+        return world, screen
+
+    def draw_graphics(self, clip_path, out_path, track, manifest, homography,
+                      analytics=None):
+        """Standalone graphics pass (used by compose() when there is no separate
+        crop step). Draws world + screen graphics in the same pixel space."""
+        import cv2
+
         fps = getattr(track, "fps", self.cfg["render"]["fps"]) or 30.0
+        world, screen = self.make_annotators(track, manifest, analytics)
         cap = cv2.VideoCapture(clip_path)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         sink = ff.RawFrameSink(out_path, w, h, fps,
                                ff.pick_encoder(self.cfg["render"]["encoder"]),
-                               audio_src=clip_path)
-
-        ball_trail: list[tuple[float, float]] = []
+                               audio_src=clip_path, intermediate=True)
         idx = 0
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            ft = frames[idx] if idx < len(frames) else None
-            frame = self._annotate_frame(frame, ft, hero_id, ball_trail, tele,
-                                         analytics)
-            self._draw_possession_plate(frame, ft, analytics)
+            frame = world(frame, idx)
+            frame = screen(frame, idx)
             sink.write(frame)
             idx += 1
         cap.release()
@@ -119,7 +144,8 @@ class Composer:
         log.info(f"[composer] graphics layer -> {Path(out_path).name}")
         return out_path
 
-    def _annotate_frame(self, frame, ft, hero_id, ball_trail, tele, analytics=None):
+    def _annotate_frame(self, frame, ft, hero_id, ball_trail, tele, analytics=None,
+                        hero_state=None):
         import cv2
         if ft is None:
             return frame
@@ -135,9 +161,14 @@ class Composer:
                 self._foot_ellipse(frame, p["xyxy"], col,
                                    max(1, tele.get("line_thickness", 4) - 2))
 
-        # hero halo (thicker; team colour if available) + jersey number label
+        # hero halo (thicker; team colour if available) + jersey number label.
+        # Use a temporally-smoothed/persistent box so the halo doesn't flicker
+        # when the hero detection drops for a few frames.
         if tele.get("spotlight_scorer", True) and hero_id is not None:
-            hero = next((p for p in getattr(ft, "players", []) if p["id"] == hero_id), None)
+            hero = (_smooth_hero(ft, hero_id, hero_state, tele)
+                    if hero_state is not None
+                    else next((p for p in getattr(ft, "players", [])
+                               if p["id"] == hero_id), None))
             if hero:
                 col = (analytics.color_for_track(hero_id, default_color)
                        if analytics is not None else default_color)
@@ -256,7 +287,8 @@ class Composer:
                    "-filter_complex", _filtergraph(use_interp), "-map", "[vout]"]
             if has_audio:
                 cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
-            cmd += [*ff.venc_args(encoder), out_path]
+            # intermediate quality: typography runs after this, branding after that
+            cmd += [*ff.venc_args(encoder, intermediate=True), out_path]
             ff.run(cmd, desc="slowmo segment")
 
         try:
@@ -393,6 +425,34 @@ def compose_highlight(clip_path: str, out_path: str, cfg: dict, brand: dict,
 # --------------------------------------------------------------------------- #
 # pillow text rendering
 # --------------------------------------------------------------------------- #
+def _smooth_hero(ft, hero_id, state: dict, tele: dict):
+    """Return a temporally-smoothed/persistent hero box {'xyxy': [...]}.
+
+    Detection flickers frame-to-frame; without this the hero halo blinks. We
+    EMA-smooth the box when the hero is seen and HOLD the last box for up to
+    `halo_hold_frames` when the detection drops, so the halo glides and persists
+    instead of popping.
+    """
+    import numpy as np
+    hold = int(tele.get("halo_hold_frames", 6))
+    alpha = float(tele.get("halo_smooth", 0.5))
+    cur = None
+    if ft is not None:
+        cur = next((p for p in getattr(ft, "players", []) if p["id"] == hero_id), None)
+    if cur is not None:
+        box = np.asarray(cur["xyxy"], dtype=np.float64)
+        if state.get("box") is not None:
+            box = alpha * np.asarray(state["box"], dtype=np.float64) + (1 - alpha) * box
+        state["box"] = box.tolist()
+        state["miss"] = 0
+        return {"xyxy": state["box"]}
+    # hero missing this frame: persist the last known box for a short while
+    if state.get("box") is not None and state.get("miss", 0) < hold:
+        state["miss"] = state.get("miss", 0) + 1
+        return {"xyxy": state["box"]}
+    return None
+
+
 def _load_font(path, size):
     from PIL import ImageFont
     try:

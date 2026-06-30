@@ -143,7 +143,20 @@ def pick_hwaccel(requested: str) -> str:
     return ""
 
 
-def venc_args(encoder: str) -> list[str]:
+def venc_args(encoder: str, intermediate: bool = False) -> list[str]:
+    """Video-encoder args.
+
+    `intermediate=True` returns near-visually-lossless settings for INTERNAL
+    passes (graphics/reframe/slow-mo), so chaining several render stages no
+    longer softens the image through repeated lossy generations. The final,
+    delivered encode uses the normal (smaller) quality settings.
+    """
+    if intermediate:
+        if encoder == "h264_nvenc":
+            return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "14",
+                    "-pix_fmt", "yuv420p"]
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
+                "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21", "-pix_fmt", "yuv420p"]
     return ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p"]
@@ -191,7 +204,7 @@ def esc_drawtext(text: str) -> str:
 
 
 def mux_audio(video_only: str, audio_src: str, out: str,
-              encoder: str = "libx264") -> str:
+              encoder: str = "libx264", intermediate: bool = False) -> str:
     """Combine a (possibly silent) video file with the audio from `audio_src`.
 
     Re-encodes video to H.264 for downstream compatibility and synthesises a
@@ -205,7 +218,7 @@ def mux_audio(video_only: str, audio_src: str, out: str,
         cmd += ["-f", "lavfi", "-i",
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-map", "0:v:0", "-map", "1:a"]
-    cmd += [*venc_args(encoder), "-c:a", "aac", "-b:a", "192k",
+    cmd += [*venc_args(encoder, intermediate), "-c:a", "aac", "-b:a", "192k",
             "-ar", "48000", "-ac", "2", "-shortest", out]
     run(cmd, desc="mux audio")
     return out
@@ -241,7 +254,8 @@ class RawFrameSink:
     """
 
     def __init__(self, out_path: str, width: int, height: int, fps: float,
-                 encoder: str = "libx264", audio_src: str | None = None):
+                 encoder: str = "libx264", audio_src: str | None = None,
+                 intermediate: bool = False):
         self.out_path = out_path
         self.width = int(width)
         self.height = int(height)
@@ -259,7 +273,7 @@ class RawFrameSink:
             cmd += ["-f", "lavfi", "-i",
                     "anullsrc=channel_layout=stereo:sample_rate=48000",
                     "-map", "0:v:0", "-map", "1:a"]
-        cmd += [*venc_args(encoder), "-c:a", "aac", "-b:a", "192k",
+        cmd += [*venc_args(encoder, intermediate), "-c:a", "aac", "-b:a", "192k",
                 "-ar", "48000", "-ac", "2", "-shortest", out_path]
         self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                                       stdout=subprocess.DEVNULL,
