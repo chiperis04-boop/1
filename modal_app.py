@@ -22,7 +22,7 @@ import modal
 
 APP_NAME = "football-highlight-studio"
 REMOTE = "/root/fhs"                       # project root inside the container
-GPU = "L40S"                               # L40S (target) | T4 | L4 | A10G | A100 | H100
+GPU = "A100-80GB"                          # A100-80GB (target) | L40S | A10G | H100
 
 app = modal.App(APP_NAME)
 
@@ -76,26 +76,50 @@ except TypeError:                          # older Modal SDK without `required`
 
 # --------------------------------------------------------------------------- #
 # Vision-LLM (the Director / Critic "brain"), served as an OpenAI-compatible
-# endpoint by vLLM on its own GPU container. Open-source, runs 24/7 on an L40S.
+# endpoint by vLLM on its own GPU container. Open-source, runs 24/7.
 #   modal run   modal_app.py::setup_vlm   # one-time: cache the weights on Volume
 #   modal deploy modal_app.py             # serves /vlm alongside the WebUI
 # Then point the studio at it (see _vlm_overrides + DEPLOY_MODAL.md):
 #   modal secret create fhs-vlm FHS_VLM_URL=https://<you>--...-vlm.modal.run
-# Default model fits one L40S (48 GB) comfortably; swap via the FHS_VLM_MODEL env.
+#
+# Director-VLM = Qwen2.5-VL-72B-Instruct-AWQ on a single A100-80GB: ~40-45GB AWQ
+# weights + KV-cache + the vision encoder fit at gpu-mem-util ~0.9. Why A100/
+# Ampere over Blackwell: the stack is MATURE — prebuilt flash-attn/flashinfer
+# wheels, vLLM "just works" on a stock CUDA 12.x image, no nvcc/sm_120/CUDA-12.8
+# build dance. FHS_VLM_MODEL overrides the served model at deploy time, so the
+# documented fallback chain (72B-AWQ -> 32B-AWQ -> 7B -> offline heuristic) is a
+# one-env-var change with no code edit.
 # --------------------------------------------------------------------------- #
-VLM_MODEL = "Qwen/Qwen2-VL-7B-Instruct"    # open-source multimodal Director brain
-VLM_SERVED_NAME = "qwen2-vl"
+VLM_MODEL = "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"   # primary Director brain (AWQ, A100-80GB)
+VLM_SERVED_NAME = "qwen2.5-vl"
+# Manual fallbacks if the 72B can't be served (smaller AWQ, then 7B); the
+# offline heuristic Director is the final fallback and needs no GPU at all.
+VLM_FALLBACK_MODELS = [
+    "Qwen/Qwen2.5-VL-32B-Instruct-AWQ",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
+]
 
+# CUDA *devel* base (ships nvcc) so flash-attn/flashinfer have their build
+# toolchain on Ampere — which is exactly why we DON'T need the old
+# VLLM_USE_FLASHINFER_SAMPLER=0 workaround anymore (that was only required on the
+# nvcc-less debian_slim image). Versions pinned for reproducibility; Qwen2.5-VL
+# needs transformers>=4.49 and a vLLM build with Qwen2.5-VL + AWQ support.
 vllm_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("vllm>=0.6.3", "qwen-vl-utils", "huggingface_hub>=0.24,<1.0")
+    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04",
+                              add_python="3.11")
+    .apt_install("git")
+    .pip_install(
+        "vllm==0.7.3",
+        "transformers==4.49.0",
+        "accelerate==1.3.0",
+        "autoawq==0.2.8",
+        "qwen-vl-utils==0.0.10",
+        "huggingface_hub[hf_transfer]>=0.26,<1.0",
+    )
     .env({"HF_HOME": f"{REMOTE}/models/cache/hf",
           "HF_HUB_CACHE": f"{REMOTE}/models/cache/hf/hub",
-          "VLLM_DO_NOT_TRACK": "1",
-          # debian_slim has no CUDA toolkit (nvcc), so FlashInfer can't JIT-build
-          # its sampling kernel at startup. Use vLLM's native torch sampler
-          # instead (no compilation needed) — fixes "Could not find nvcc".
-          "VLLM_USE_FLASHINFER_SAMPLER": "0"})
+          "HF_HUB_ENABLE_HF_TRANSFER": "1",
+          "VLLM_DO_NOT_TRACK": "1"})
 )
 
 
@@ -103,37 +127,44 @@ vllm_image = (
               secrets=HF_SECRET, timeout=60 * 60)
 def setup_vlm():
     """One-time: download the vision-LLM weights onto the models Volume so the
-    always-on server has zero cold-download."""
+    always-on server has zero cold-download (~40GB for the 72B AWQ)."""
+    import os
     from huggingface_hub import snapshot_download
-    path = snapshot_download(VLM_MODEL)
+    model = os.environ.get("FHS_VLM_MODEL", VLM_MODEL)
+    path = snapshot_download(model, ignore_patterns=["*.pt", "*.bin"])
     models_vol.commit()
-    print(f"vLLM model cached: {VLM_MODEL} -> {path}")
+    print(f"vLLM model cached: {model} -> {path}")
     return path
 
 
 @app.function(image=vllm_image, gpu=GPU, volumes={f"{REMOTE}/models": models_vol},
-              secrets=HF_SECRET, timeout=24 * 60 * 60, scaledown_window=20 * 60)
+              secrets=HF_SECRET, timeout=24 * 60 * 60, scaledown_window=20 * 60,
+              max_containers=1)
 @modal.concurrent(max_inputs=16)           # vLLM batches requests internally
-@modal.web_server(8000, startup_timeout=15 * 60)
+@modal.web_server(8000, startup_timeout=30 * 60)
 def vlm():
-    """OpenAI-compatible vision endpoint (vLLM serving Qwen2-VL).
+    """OpenAI-compatible vision endpoint (vLLM serving Qwen2.5-VL-72B-AWQ).
 
     Exposes /v1/chat/completions with image_url content — exactly what
-    src/agents/llm_client.VisionLLMClient (backend='openai') speaks."""
+    src/agents/llm_client.VisionLLMClient (backend='openai') speaks. The big 72B
+    cold start is front-loaded here; web()/studio_job hit this warm endpoint."""
+    import os
     import subprocess
-    # NOTE: build argv as a LIST (no shlex) — recent vLLM takes
-    # --limit-mm-per-prompt as JSON (e.g. {"image": 16}), which must be a single
-    # argv element, not the old image=16 form.
+    model = os.environ.get("FHS_VLM_MODEL", VLM_MODEL)
+    # NOTE: build argv as a LIST (no shlex). Recent vLLM takes
+    # --limit-mm-per-prompt as a JSON string (e.g. {"image": 8}) — a single argv
+    # element, not the old image=8 form (that was the prior "argument error").
     cmd = [
-        "python", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", VLM_MODEL,
+        "vllm", "serve", model,
         "--served-model-name", VLM_SERVED_NAME,
         "--host", "0.0.0.0", "--port", "8000",
-        "--max-model-len", "8192",
-        "--limit-mm-per-prompt", '{"image": 16}',
-        "--gpu-memory-utilization", "0.92",
+        "--quantization", "awq",
+        "--max-model-len", "16384",
+        "--limit-mm-per-prompt", '{"image": 8}',
+        "--gpu-memory-utilization", "0.90",
         "--trust-remote-code",
     ]
+    print("launching:", " ".join(cmd))
     subprocess.Popen(cmd)
 
 

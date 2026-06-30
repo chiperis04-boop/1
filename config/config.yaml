@@ -236,10 +236,14 @@ render:
 # ============================================================
 
 # ---- Director: vision-LLM editing manifest ----
+# On Modal the served brain is Qwen2.5-VL-72B-Instruct-AWQ (vLLM, A100-80GB);
+# wire it by setting backend=openai + base_url (or the FHS_VLM_URL env, which the
+# Modal web()/studio functions translate automatically). Default stays heuristic
+# so the pipeline runs offline with no GPU/network.
 director:
-  backend: heuristic            # heuristic | gemini | openai (MiniCPM/Qwen2-VL/local)
-  model: gemini-1.5-flash       # gemini model id, or openai/local model name
-  base_url: null                # OpenAI-compatible endpoint (e.g. local vLLM)
+  backend: heuristic            # heuristic | gemini | openai (Qwen2.5-VL/local vLLM)
+  model: gemini-1.5-flash       # gemini id, or openai/local model name (e.g. qwen2.5-vl)
+  base_url: null                # OpenAI-compatible endpoint (e.g. the vLLM /v1 URL)
   sample_fps: 1.0               # frames/sec fed to the model
   max_frames: 16
   temperature: 0.4
