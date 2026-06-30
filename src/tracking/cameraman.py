@@ -300,6 +300,10 @@ class Cameraman:
             "proximity_thresh: 0.5\n"
             "appearance_thresh: 0.25\n"
             f"with_reid: {str(bool(self.t.get('with_reid', False))).lower()}\n"
+            # Ultralytics 8.3+/8.4 require a `model` key on the BoT-SORT config
+            # (the ReID encoder; 'auto' lets it pick). Without it tracking raises
+            # "'IterableSimpleNamespace' object has no attribute 'model'".
+            f"model: {self.t.get('reid_model', 'auto')}\n"
         )
         d = Path(tempfile.gettempdir()) / "fhs_botsort.yaml"
         d.write_text(text, encoding="utf-8")
