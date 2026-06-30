@@ -116,16 +116,21 @@ def vlm():
 
     Exposes /v1/chat/completions with image_url content — exactly what
     src/agents/llm_client.VisionLLMClient (backend='openai') speaks."""
-    import shlex
     import subprocess
-    cmd = (
-        "python -m vllm.entrypoints.openai.api_server "
-        f"--model {VLM_MODEL} --served-model-name {VLM_SERVED_NAME} "
-        "--host 0.0.0.0 --port 8000 "
-        "--max-model-len 8192 --limit-mm-per-prompt image=16 "
-        "--gpu-memory-utilization 0.92 --trust-remote-code"
-    )
-    subprocess.Popen(shlex.split(cmd))
+    # NOTE: build argv as a LIST (no shlex) — recent vLLM takes
+    # --limit-mm-per-prompt as JSON (e.g. {"image": 16}), which must be a single
+    # argv element, not the old image=16 form.
+    cmd = [
+        "python", "-m", "vllm.entrypoints.openai.api_server",
+        "--model", VLM_MODEL,
+        "--served-model-name", VLM_SERVED_NAME,
+        "--host", "0.0.0.0", "--port", "8000",
+        "--max-model-len", "8192",
+        "--limit-mm-per-prompt", '{"image": 16}',
+        "--gpu-memory-utilization", "0.92",
+        "--trust-remote-code",
+    ]
+    subprocess.Popen(cmd)
 
 
 def _vlm_overrides() -> dict:
