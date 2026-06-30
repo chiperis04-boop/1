@@ -161,12 +161,20 @@ telestration:
   freeze_callout: true          # freeze + zoom + arrow before key action
   arrow_color: [0, 200, 255]    # BGR
   spotlight_color: [0, 220, 255]
-  trail_color: [255, 255, 255]
-  line_thickness: 4
+  trail_color: [255, 255, 255]  # ball trail = white neon
+  line_thickness: 2             # SLEEK halos: thin outline (<=2px), not heavy
   team_halos: true              # colour every player's halo in their club colour
-                                # (from vision.teams); hero gets a thicker ring
+                                # (from vision.teams); hero gets a slightly thicker ring
+  # Vivid NEON team palette (BGR), assigned by team label so rings read clearly
+  # on broadcast (instead of the muddy median-jersey colour). team0 / team1 / ...
+  team_palette:
+    - [60, 60, 255]             # team 0 -> neon red
+    - [40, 230, 255]            # team 1 -> neon yellow
+  trail_length: 12              # ball trail length in frames (10-15 = quick neon spark)
+  trail_max_jump_frac: 0.18     # drop trail segments longer than this*frame_w (ball can't teleport)
   halo_hold_frames: 6           # keep the hero halo for N frames if detection drops
   halo_smooth: 0.5              # EMA factor for the hero halo box (anti-flicker)
+  possession_plate: true        # compact semi-transparent POSSESSION plate (bottom)
 
 # ---- shot segmentation (broadcast camera cuts) ----
 # The studio plans tracking + crop PER SHOT so the 9:16 camera resets at every
@@ -183,6 +191,11 @@ edit:
     target_aspect: "9:16"       # 9:16 | 1:1 | 16:9
     mode: action_track          # action_track | center | letterbox
     smoothing: 0.85             # camera smoothing for the virtual crop
+    # Aggressive action-centric punch-in: size the crop so the hero fills this
+    # fraction of the frame height (0.45 = hero ~45% tall). Lower = wider.
+    target_subject_height: 0.45
+    min_zoom: 1.0               # never wider than full-height slice
+    max_zoom: 2.6               # cap punch-in so a tiny far player doesn't over-zoom
   effects:
     slowmo_on_key: true
     slowmo_factor: 0.4

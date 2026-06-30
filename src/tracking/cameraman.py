@@ -235,12 +235,22 @@ class Cameraman:
     def _plan_from_frames(self, frames, meta, hero_hint: int | None = None,
                           shots=None, shot_edits=None, hero_ids=None):
         w, h, fps = meta["w"], meta["h"], meta["fps"]
-        aspect = self.cfg.get("edit", {}).get("reframe", {}).get("target_aspect", "9:16")
+        rf = self.cfg.get("edit", {}).get("reframe", {})
+        aspect = rf.get("target_aspect", "9:16")
         aw, ah = (int(x) for x in aspect.split(":"))
-        crop_h = h
-        crop_w = min(w, int(round(crop_h * aw / ah)))
 
         hero_id = hero_hint if hero_hint is not None else _pick_hero(frames)
+
+        # Aggressive action-centric base zoom: size the crop so the hero fills
+        # ~target_subject_height of the frame instead of using the full height
+        # (which reads as a static letterbox slice). Per-shot Director zoom still
+        # multiplies on top of this.
+        base_zoom = 1.0
+        if rf.get("mode", "action_track") != "letterbox":
+            base_zoom = _auto_zoom(frames, hero_id, h, rf)
+        crop_h = max(1, min(h, int(round(h / base_zoom))))
+        crop_w = min(w, int(round(crop_h * aw / ah)))
+
         # follow a per-frame hero (cross-shot Re-ID) when supplied
         focus = _focus_points(frames, hero_ids if hero_ids is not None else hero_id,
                               w, h)
@@ -393,6 +403,30 @@ def _best_ball(dets, ball_cls):
     if len(bd) == 0:
         return None
     return bd.xyxy[int(np.argmax(bd.confidence))]
+
+
+def _auto_zoom(frames, hero_id, h, rf) -> float:
+    """Base punch-in so the hero fills ~target_subject_height of the frame.
+
+    zoom = frame_h / crop_h, where crop_h = hero_height / target. A small (far)
+    hero -> higher zoom (tighter); clamped to [min_zoom, max_zoom] so a tiny
+    misdetection can't over-zoom into a shaky crop.
+    """
+    target = float(rf.get("target_subject_height", 0.45))
+    lo = float(rf.get("min_zoom", 1.0))
+    hi = float(rf.get("max_zoom", 2.6))
+    if target <= 0 or hero_id is None:
+        return lo
+    hs = [float(p["xyxy"][3] - p["xyxy"][1])
+          for ft in frames for p in getattr(ft, "players", [])
+          if p["id"] == hero_id]
+    if not hs:
+        return lo
+    hero_h = float(np.median(hs))
+    if hero_h <= 1.0:
+        return lo
+    zoom = (h * target) / hero_h
+    return max(lo, min(hi, zoom))
 
 
 def _pick_hero(frames: list[FrameTrack]) -> int | None:

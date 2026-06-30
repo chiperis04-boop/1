@@ -49,6 +49,10 @@ class TeamClassifier:
         self.enabled = bool(t.get("enabled", False))
         self.n_teams = int(t.get("n_teams", 2))
         self.method = t.get("method", "hsv")     # hsv | siglip
+        # Vivid neon palette (BGR) assigned per team label so halos read clearly
+        # on broadcast footage; falls back to the median jersey colour if unset.
+        self.palette = [tuple(c) for c in
+                        cfg.get("telestration", {}).get("team_palette", []) or []]
 
     def classify(self, clip_path: str, track: TrackResult) -> dict[int, int]:
         """Return {track_id: team_label}. team_label in {0,1,-1(unknown)}.
@@ -105,10 +109,14 @@ class TeamClassifier:
             votes[tid][int(lab)] += 1
         team_of = {tid: c.most_common(1)[0][0] for tid, c in votes.items()}
 
-        # dominant colour per team = median torso BGR of its samples
+        # dominant colour per team. Prefer the vivid neon palette (clear on
+        # broadcast) keyed by team label; fall back to the median torso BGR.
         colors: dict[int, tuple[int, int, int]] = {}
         bgr_arr = np.array(torso_bgr, dtype=np.float32)
         for lab in range(self.n_teams):
+            if lab < len(self.palette):
+                colors[lab] = tuple(int(c) for c in self.palette[lab])
+                continue
             sel = bgr_arr[labels == lab]
             if len(sel):
                 med = np.median(sel, axis=0).astype(int)

@@ -158,12 +158,15 @@ def vlm():
         "vllm", "serve", model,
         "--served-model-name", VLM_SERVED_NAME,
         "--host", "0.0.0.0", "--port", "8000",
-        "--quantization", "awq",
         "--max-model-len", "16384",
         "--limit-mm-per-prompt", '{"image": 8}',
         "--gpu-memory-utilization", "0.90",
         "--trust-remote-code",
     ]
+    # Only pass AWQ when serving an AWQ checkpoint; the 7B/32B non-AWQ fallbacks
+    # (and any fp16 model) must NOT get --quantization awq or vLLM errors out.
+    if "awq" in model.lower():
+        cmd[5:5] = ["--quantization", "awq"]
     print("launching:", " ".join(cmd))
     subprocess.Popen(cmd)
 

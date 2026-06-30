@@ -167,7 +167,7 @@ class Composer:
                     continue
                 col = analytics.color_for_track(p["id"], default_color)
                 self._foot_ellipse(frame, p["xyxy"], col,
-                                   max(1, tele.get("line_thickness", 4) - 2))
+                                   max(1, tele.get("line_thickness", 2) - 1))
 
         # hero halo (thicker; team colour if available) + jersey number label.
         # Use a temporally-smoothed/persistent box so the halo doesn't flicker
@@ -181,7 +181,7 @@ class Composer:
                 col = (analytics.color_for_track(hero_id, default_color)
                        if analytics is not None else default_color)
                 self._foot_ellipse(frame, hero["xyxy"], col,
-                                   tele.get("line_thickness", 4) + 1)
+                                   tele.get("line_thickness", 2))
                 num = (analytics.jerseys.number_of.get(hero_id)
                        if analytics is not None else None)
                 if num is not None:
@@ -191,13 +191,22 @@ class Composer:
                     cv2.putText(frame, f"#{num}", (x1, max(12, y1 - 8)),
                                 cv2.FONT_HERSHEY_DUPLEX, 0.9, col, 2, cv2.LINE_AA)
 
-        # glowing ball trail
+        # glowing ball trail — a quick neon spark, not a heavy distraction.
+        # Reject teleport segments (spurious ball re-detections across the
+        # pitch) that would otherwise draw long lines "into the sky".
         if tele.get("ball_trail", True) and getattr(ft, "ball", None):
             bx, by = ft.ball["center"]
+            w_frame = frame.shape[1]
+            max_jump = float(tele.get("trail_max_jump_frac", 0.18)) * w_frame
+            if ball_trail:
+                px, py = ball_trail[-1]
+                if ((bx - px) ** 2 + (by - py) ** 2) ** 0.5 > max_jump:
+                    ball_trail.clear()        # ball can't teleport -> new segment
             ball_trail.append((bx, by))
-            if len(ball_trail) > tele.get("trail_length", 30):
+            if len(ball_trail) > int(tele.get("trail_length", 12)):
                 ball_trail.pop(0)
-            self._draw_trail(frame, ball_trail, tuple(tele.get("trail_color", [255, 255, 255])))
+            self._draw_trail(frame, ball_trail,
+                             tuple(tele.get("trail_color", [255, 255, 255])))
         return frame
 
     @staticmethod
@@ -210,9 +219,13 @@ class Composer:
                     tuple(int(c) for c in color), thickness, cv2.LINE_AA)
 
     def _draw_possession_plate(self, frame, ft, analytics):
-        """Live 'POSSESSION' plate when a confirmed possession run is active."""
+        """Compact, semi-transparent 'POSSESSION' plate pinned to the bottom
+        safe-zone when a confirmed possession run is active (event-driven, not
+        persistent), so it never blocks faces/ball or duplicates the stat card."""
         import cv2
         if ft is None or analytics is None:
+            return
+        if not self.cfg.get("telestration", {}).get("possession_plate", True):
             return
         run = analytics.possession.run_at(getattr(ft, "idx", -1))
         if run is None:
@@ -221,16 +234,19 @@ class Composer:
         label = "POSSESSION" + (f"  #{num}" if num is not None else "")
         col = analytics.color_for_track(run.track_id, (0, 220, 255))
         h, w = frame.shape[:2]
-        x, y = int(w * 0.04), int(h * 0.06)
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.8, 2)
+        scale = 0.6
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, scale, 1)
+        # bottom safe-zone, above the platform UI band (~12% from bottom)
+        x = int(w * 0.05)
+        y = int(h * 0.88)
         overlay = frame.copy()
-        cv2.rectangle(overlay, (x - 10, y - th - 12), (x + tw + 14, y + 10),
+        cv2.rectangle(overlay, (x - 8, y - th - 8), (x + tw + 10, y + 8),
                       (0, 0, 0), -1)
-        cv2.rectangle(overlay, (x - 10, y - th - 12), (x - 4, y + 10),
+        cv2.rectangle(overlay, (x - 8, y - th - 8), (x - 4, y + 8),
                       tuple(int(c) for c in col), -1)        # team-colour accent
-        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-        cv2.putText(frame, label, (x + 6, y), cv2.FONT_HERSHEY_DUPLEX, 0.8,
-                    (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
+        cv2.putText(frame, label, (x + 4, y), cv2.FONT_HERSHEY_DUPLEX, scale,
+                    (255, 255, 255), 1, cv2.LINE_AA)
 
     @staticmethod
     def _draw_trail(frame, pts, color):
@@ -238,7 +254,7 @@ class Composer:
         n = len(pts)
         for i in range(1, n):
             a = i / n
-            thick = max(1, int(6 * a))
+            thick = max(1, int(2 * a + 0.5))    # sleek neon spark, <=2px
             p0 = (int(pts[i - 1][0]), int(pts[i - 1][1]))
             p1 = (int(pts[i][0]), int(pts[i][1]))
             cv2.line(frame, p0, p1, color, thick, cv2.LINE_AA)
@@ -460,9 +476,8 @@ class Composer:
         if not stats:
             return []
         out = []
-        if stats.get("possession_pct"):
-            pp = stats["possession_pct"]
-            out.append("POSSESSION  " + " / ".join(f"{v}%" for v in pp))
+        # NB: live possession is shown by the compact screen plate
+        # (_draw_possession_plate); don't duplicate it as a big stat card here.
         if "shot_distance_m" in stats:
             out.append(f"SHOT  {stats['shot_distance_m']:.0f} M")
         if "sprint_distance_m" in stats:
