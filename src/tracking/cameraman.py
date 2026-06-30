@@ -270,13 +270,16 @@ class Cameraman:
     # --------------------------------------------------------------- render
     def render(self, clip_path: str, plan: CropPlan, out_path: str) -> str:
         """Crop every frame to its planned window and resize to the target
-        9:16 profile, then mux the original audio back (audio-safe)."""
+        9:16 profile, then mux the original audio back (audio-safe).
+
+        Frames are piped straight into a single H.264 encode (no lossy mp4v
+        intermediate), and the upscaled crop uses Lanczos for crispness."""
         import cv2
 
         cap = cv2.VideoCapture(clip_path)
-        tmp = out_path.replace(".mp4", "_silent.mp4")
-        writer = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"),
-                                 plan.fps, (plan.out_w, plan.out_h))
+        encoder = ff.pick_encoder(self.cfg.get("render", {}).get("encoder", "libx264"))
+        sink = ff.RawFrameSink(out_path, plan.out_w, plan.out_h, plan.fps,
+                               encoder, audio_src=clip_path)
         idx = 0
         while True:
             ok, frame = cap.read()
@@ -287,14 +290,11 @@ class Cameraman:
             y0 = max(0, min(y0, plan.src_h - ch))
             crop = frame[y0:y0 + ch, x0:x0 + cw]
             crop = cv2.resize(crop, (plan.out_w, plan.out_h),
-                              interpolation=cv2.INTER_AREA)
-            writer.write(crop)
+                              interpolation=cv2.INTER_LANCZOS4)
+            sink.write(crop)
             idx += 1
         cap.release()
-        writer.release()
-        encoder = ff.pick_encoder(self.cfg.get("render", {}).get("encoder", "libx264"))
-        ff.mux_audio(tmp, clip_path, out_path, encoder)
-        Path(tmp).unlink(missing_ok=True)
+        sink.close()
         log.info(f"[cameraman] {plan.out_w}x{plan.out_h} CMC reframe -> "
                  f"{Path(out_path).name} (hero={plan.hero_id})")
         return out_path
@@ -397,9 +397,13 @@ def _kalman_smooth(xs: np.ndarray, ys: np.ndarray, fps: float, cfg: dict):
 
 
 def _kalman_1d(z: np.ndarray, q: float, r: float, fps: float) -> np.ndarray:
-    """1-D constant-velocity Kalman filter + RTS-style forward smoothing.
+    """1-D constant-velocity Kalman filter + RTS (backward) smoothing.
 
-    State = [position, velocity]. Returns the filtered position per step.
+    State = [position, velocity]. A forward-only Kalman filter lags behind fast
+    motion, so the crop window trails the ball. Since the whole clip is known
+    offline, we run the Rauch-Tung-Striebel backward pass to get the optimal
+    *smoothed* (zero-lag) estimate — the camera then anticipates motion instead
+    of chasing it. Returns the smoothed position per step.
     """
     n = len(z)
     if n == 0:
@@ -409,21 +413,35 @@ def _kalman_1d(z: np.ndarray, q: float, r: float, fps: float) -> np.ndarray:
     H = np.array([[1.0, 0.0]])
     Q = q * np.array([[dt**3 / 3, dt**2 / 2], [dt**2 / 2, dt]])
     R = np.array([[r]])
+
+    # ---- forward filter (store a-priori and a-posteriori states/covs) ----
+    xf = np.zeros((n, 2, 1))      # filtered (a-posteriori) state
+    Pf = np.zeros((n, 2, 2))      # filtered covariance
+    xp = np.zeros((n, 2, 1))      # predicted (a-priori) state
+    Pp = np.zeros((n, 2, 2))      # predicted covariance
     x = np.array([[z[0]], [0.0]])
     P = np.eye(2) * 1000.0
-    out = np.empty(n)
     for k in range(n):
         # predict
         x = F @ x
         P = F @ P @ F.T + Q
+        xp[k], Pp[k] = x, P
         # update
         y = np.array([[z[k]]]) - H @ x
         S = H @ P @ H.T + R
         K = P @ H.T @ np.linalg.inv(S)
         x = x + K @ y
         P = (np.eye(2) - K @ H) @ P
-        out[k] = x[0, 0]
-    return out
+        xf[k], Pf[k] = x, P
+
+    # ---- RTS backward smoothing ----
+    xs = xf.copy()
+    Ps = Pf.copy()
+    for k in range(n - 2, -1, -1):
+        C = Pf[k] @ F.T @ np.linalg.inv(Pp[k + 1])
+        xs[k] = xf[k] + C @ (xs[k + 1] - xp[k + 1])
+        Ps[k] = Pf[k] + C @ (Ps[k + 1] - Pp[k + 1]) @ C.T
+    return xs[:, 0, 0]
 
 
 def _ema(x: np.ndarray, alpha: float) -> np.ndarray:

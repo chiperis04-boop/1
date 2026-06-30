@@ -175,6 +175,9 @@ edit:
     slowmo_on_key: true
     slowmo_factor: 0.4
     slowmo_window: 2.5
+    slowmo_interpolate: true          # motion-interpolate the slowed window so
+                                      # it glides instead of stepping/juddering
+    slowmo_interpolation_quality: mci # mci (motion-compensated) | blend (cheap)
     freeze_zoom: true
     freeze_zoom_scale: 1.4
   audio:
@@ -182,12 +185,16 @@ edit:
     crowd_sfx: assets/sfx/crowd_roar.wav
     music_db: -16.0             # music loudness target (LUFS-ish)
     music_volume: 0.35          # linear gain applied to the music bed
-    duck_under_commentary: true
+    duck_under_commentary: true # sidechain-duck music when the commentator speaks
+    loudnorm: true              # EBU R128 normalize the final mix
+    loudness_target_lufs: -14   # social-platform target (TikTok/Reels/Shorts)
   captions:
     enabled: true
     style: tiktok               # tiktok | clean | broadcast
     font: assets/fonts/Inter-Bold.ttf
     fontsize: 58
+    safe_y: 0.62                # vertical position as a fraction of height;
+                                # kept above the bottom ~20% platform-UI band
     max_words_per_line: 4
 
 render:

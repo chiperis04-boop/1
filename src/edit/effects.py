@@ -39,26 +39,49 @@ def apply_slowmo(clip_path: str, key_t: float, out_path: str, cfg: dict) -> str:
     pts = 1.0 / factor
     atempo = max(0.5, min(2.0, factor))          # atempo valid range 0.5..2.0
     encoder = ff.pick_encoder(cfg["render"]["encoder"])
+    out_fps = int(cfg["render"]["fps"])
+    interp = bool(e.get("slowmo_interpolate", True))
+    quality = e.get("slowmo_interpolation_quality", "mci")
 
-    vf = (
-        f"[0:v]trim=0:{start:.3f},setpts=PTS-STARTPTS[v0];"
-        f"[0:v]trim={start:.3f}:{end:.3f},setpts={pts:.3f}*(PTS-STARTPTS)[v1];"
-        f"[0:v]trim={end:.3f},setpts=PTS-STARTPTS[v2];"
-        f"[v0][v1][v2]concat=n=3:v=1:a=0[v]"
-    )
+    def _vf(use_interp: bool) -> str:
+        # the slowed window optionally gets motion-compensated interpolation so
+        # it plays fluidly instead of stepping through duplicated frames
+        slow = f"setpts={pts:.3f}*(PTS-STARTPTS)"
+        if use_interp:
+            slow += "," + ff.minterpolate_expr(out_fps, quality)
+        return (
+            f"[0:v]trim=0:{start:.3f},setpts=PTS-STARTPTS[v0];"
+            f"[0:v]trim={start:.3f}:{end:.3f},{slow}[v1];"
+            f"[0:v]trim={end:.3f},setpts=PTS-STARTPTS[v2];"
+            f"[v0][v1][v2]concat=n=3:v=1:a=0[v]"
+        )
+
     af = (
         f"[0:a]atrim=0:{start:.3f},asetpts=PTS-STARTPTS[a0];"
         f"[0:a]atrim={start:.3f}:{end:.3f},asetpts=PTS-STARTPTS,atempo={atempo:.3f}[a1];"
         f"[0:a]atrim={end:.3f},asetpts=PTS-STARTPTS[a2];"
         f"[a0][a1][a2]concat=n=3:v=0:a=1[a]"
     )
-    ff.run([
-        "ffmpeg", "-y", "-i", clip_path,
-        "-filter_complex", vf + ";" + af,
-        "-map", "[v]", "-map", "[a]",
-        *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k", out_path,
-    ], desc="slowmo")
-    log.info(f"[effects] slow-mo x{factor} around {key_t:.1f}s")
+
+    def _encode(use_interp: bool) -> None:
+        ff.run([
+            "ffmpeg", "-y", "-i", clip_path,
+            "-filter_complex", _vf(use_interp) + ";" + af,
+            "-map", "[v]", "-map", "[a]",
+            *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k", out_path,
+        ], desc="slowmo")
+
+    try:
+        _encode(interp)
+    except ff.FFmpegError as exc:
+        if interp:
+            log.warning(f"[effects] minterpolate slow-mo failed ({exc}); "
+                        "retrying with plain frame-stretch")
+            _encode(False)
+        else:
+            raise
+    log.info(f"[effects] slow-mo x{factor} around {key_t:.1f}s"
+             f"{' (interpolated)' if interp else ''}")
     return out_path
 
 

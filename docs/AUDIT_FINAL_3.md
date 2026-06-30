@@ -279,3 +279,64 @@ around model loads) but need the L40S to prove:
 A 2h23m 1080p match on an L40S with NVDEC/NVENC: ~45–75 min. **v2 is more
 expensive than v1** because tracking + analytics run per-clip (BoT-SORT+CMC,
 team K-means, jersey OCR, possession) on top of the v1 montage cost.
+
+
+---
+
+## L. Quality-polish pass (output "looks good") — ✓ Verified on CPU
+
+After the deploy/audit pass, a second round addressed *visual & audio polish*
+(the difference between "technically correct" and "looks professional"). All of
+the following are CPU-testable and are covered by `tests/test_polish.py` (5
+tests) plus an added zero-phase test in `tests/test_studio.py`.
+
+1. **Motion-interpolated slow-motion.** Slow-mo previously stretched timestamps
+   (`setpts`) only, so at 0.4× it stepped through duplicated frames (judder).
+   Both engines now apply `minterpolate` (motion-compensated) to the slowed
+   window, config-gated (`edit.effects.slowmo_interpolate`, `…_quality`) with a
+   graceful fallback to plain stretch if interpolation fails. *Verified:* the
+   slowed window goes from **180 → 288 unique frames** with interpolation on.
+
+2. **Zero-lag camera smoothing.** The virtual-camera path used a causal filter
+   that lagged the action (crop trailed the ball). Since the whole clip is known
+   offline:
+   - v2 Cameraman: forward-only Kalman → full **RTS forward-backward smoother**.
+   - v1 reframe: causal EMA → **zero-phase forward+backward EMA**.
+   *Verified:* on a symmetric bump the RTS peak stays on the true peak (±3
+   frames) while the causal filter visibly lags later.
+
+3. **No more `mp4v` double-compression.** Every cv2 render
+   (`reframe`, `cameraman.render`, `composer.draw_graphics`,
+   `composer._typography_pillow`) wrote a lossy MPEG-4 part-2 intermediate that
+   was then re-encoded to H.264 (two lossy generations). New `ff.RawFrameSink`
+   pipes raw BGR frames into **one** H.264 encode with the audio muxed in the
+   same pass — one generation, and faster. The upscaled 9:16 crop now uses
+   **Lanczos** instead of `INTER_AREA` (which is down-sampling-only). *Verified:*
+   RawFrameSink yields a valid 1-video(h264)+1-audio mp4, and surfaces
+   `FFmpegError` on a failed encode (errors not swallowed).
+
+4. **Broadcast-grade audio.** Music was a static gain + `dynaudnorm`. Now:
+   - **Sidechain ducking** (`sidechaincompress`) pulls the music down whenever
+     the commentary is present (`edit.audio.duck_under_commentary`).
+   - **EBU R128 `loudnorm`** brings the final mix to the social target
+     (`edit.audio.loudnorm`, `loudness_target_lufs: -14`), pinned to 48 kHz
+     stereo so downstream concat stays safe. *Verified:* compose builds a valid
+     duck+loudnorm filtergraph → 1 video + 48 kHz stereo audio.
+
+5. **Caption safe-zone.** Burned captions moved from `y=h*0.72` (inside the
+   bottom UI band of TikTok/Reels/Shorts) to a configurable `captions.safe_y`
+   (default **0.62**); v2 stat plates moved from `0.66 → 0.58`. *Verified:* the
+   drawtext expression honours `safe_y` and no longer uses `0.72`.
+
+### Honest limits of the polish pass
+- `minterpolate` is **CPU-heavy** and can introduce warping artifacts on fast,
+  low-contrast motion; it's why it's config-gated with a plain-stretch fallback.
+  Tune `slowmo_interpolation_quality: blend` for a cheaper, artifact-free (but
+  softer) result. Real per-match cost should be measured on the L40S.
+- Zero-phase smoothing improves tracking but the **crop size is still fixed**
+  (no adaptive zoom): very wide team shots are still cropped to a narrow column.
+- These tests prove the **filtergraphs/encoders are valid and behave as intended**
+  on synthetic clips. The full v2 telestration pixels (halos/trail/plates) and
+  real-match framing quality remain ○ **verify on GPU**.
+- Output quality still depends most on **moment selection** (which clips are
+  cut) — a heuristic stage that must be validated on real footage.

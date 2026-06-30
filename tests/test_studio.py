@@ -166,6 +166,29 @@ def test_geometric_hero_vote():
     print("  ✓ geometric hero: nearest-to-ball vote picks the right track")
 
 
+def test_kalman_rts_is_zero_phase():
+    """The RTS (forward+backward) smoother must not lag the action.
+
+    On a symmetric bump a causal forward-only filter shifts the peak LATER in
+    time (lag), which is exactly why a naive auto-reframe trails the ball. The
+    RTS smoother should keep the peak essentially where it is.
+    """
+    n = 121
+    t = np.arange(n)
+    peak = 60
+    z = 1000.0 * np.exp(-((t - peak) ** 2) / (2 * 8.0 ** 2))  # gaussian bump
+    sm = _kalman_1d(z, q=2.0, r=120.0, fps=30.0)
+    causal = _ema(z, 0.85)
+    sm_peak = int(np.argmax(sm))
+    causal_peak = int(np.argmax(causal))
+    # RTS peak stays on top of the true peak ...
+    assert abs(sm_peak - peak) <= 3, f"RTS peak lagged: {sm_peak} vs {peak}"
+    # ... while the causal filter visibly lags later in time
+    assert causal_peak > sm_peak + 3, (causal_peak, sm_peak)
+    print(f"  ✓ kalman RTS zero-phase: peak@{sm_peak} (true {peak}), "
+          f"causal lags to {causal_peak}")
+
+
 # --------------------------------------------------------------------------- #
 # 3) possession: per-frame holders -> confirmed runs + bridging + share
 # --------------------------------------------------------------------------- #
@@ -311,6 +334,7 @@ def main() -> int:
         test_atempo_chain,
         test_kalman_smoothing_reduces_jitter,
         test_kalman_smooth_ema_fallback,
+        test_kalman_rts_is_zero_phase,
         test_focus_points_fallback_chain,
         test_geometric_hero_vote,
         test_possession_runs_and_bridge,

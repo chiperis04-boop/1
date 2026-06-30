@@ -98,8 +98,9 @@ class Composer:
         cap = cv2.VideoCapture(clip_path)
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        tmp = out_path.replace(".mp4", "_silent.mp4")
-        writer = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        sink = ff.RawFrameSink(out_path, w, h, fps,
+                               ff.pick_encoder(self.cfg["render"]["encoder"]),
+                               audio_src=clip_path)
 
         ball_trail: list[tuple[float, float]] = []
         idx = 0
@@ -111,13 +112,10 @@ class Composer:
             frame = self._annotate_frame(frame, ft, hero_id, ball_trail, tele,
                                          analytics)
             self._draw_possession_plate(frame, ft, analytics)
-            writer.write(frame)
+            sink.write(frame)
             idx += 1
         cap.release()
-        writer.release()
-        ff.mux_audio(tmp, clip_path, out_path,
-                     ff.pick_encoder(self.cfg["render"]["encoder"]))
-        Path(tmp).unlink(missing_ok=True)
+        sink.close()
         log.info(f"[composer] graphics layer -> {Path(out_path).name}")
         return out_path
 
@@ -225,36 +223,53 @@ class Composer:
         v_setpts = 1.0 / factor          # e.g. factor 0.4 -> setpts 2.5*PTS
         atempo = _atempo_chain(factor)
         has_audio = ff.has_audio(clip_path)
-
-        # three trims (pre / slow / post), concat. Build a single filtergraph.
-        v = [
-            f"[0:v]trim=0:{t0:.3f},setpts=PTS-STARTPTS[v0]",
-            f"[0:v]trim={t0:.3f}:{t1:.3f},setpts={v_setpts:.4f}*(PTS-STARTPTS)[v1]",
-            f"[0:v]trim={t1:.3f},setpts=PTS-STARTPTS[v2]",
-        ]
-        parts = "[v0][v1][v2]"
-        a_filters, amap = [], None
-        if has_audio:
-            a = [
-                f"[0:a]atrim=0:{t0:.3f},asetpts=PTS-STARTPTS[a0]",
-                f"[0:a]atrim={t0:.3f}:{t1:.3f},asetpts=PTS-STARTPTS,{atempo}[a1]",
-                f"[0:a]atrim={t1:.3f},asetpts=PTS-STARTPTS[a2]",
-            ]
-            a_filters = a
-            parts = "[v0][a0][v1][a1][v2][a2]"
-        concat = (f"{parts}concat=n=3:v=1:a={1 if has_audio else 0}"
-                  f"[vout]" + ("[aout]" if has_audio else ""))
-        filtergraph = ";".join(v + a_filters + [concat])
-
+        out_fps = int(self.cfg["render"]["fps"])
+        eff = self.cfg.get("edit", {}).get("effects", {})
+        interp = bool(eff.get("slowmo_interpolate", True))
+        quality = eff.get("slowmo_interpolation_quality", "mci")
         encoder = ff.pick_encoder(self.cfg["render"]["encoder"])
-        cmd = ["ffmpeg", "-y", "-i", clip_path, "-filter_complex", filtergraph,
-               "-map", "[vout]"]
-        if has_audio:
-            cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
-        cmd += [*ff.venc_args(encoder), out_path]
-        ff.run(cmd, desc="slowmo segment")
+
+        def _filtergraph(use_interp: bool) -> str:
+            slow = f"setpts={v_setpts:.4f}*(PTS-STARTPTS)"
+            if use_interp:
+                slow += "," + ff.minterpolate_expr(out_fps, quality)
+            v = [
+                f"[0:v]trim=0:{t0:.3f},setpts=PTS-STARTPTS[v0]",
+                f"[0:v]trim={t0:.3f}:{t1:.3f},{slow}[v1]",
+                f"[0:v]trim={t1:.3f},setpts=PTS-STARTPTS[v2]",
+            ]
+            parts = "[v0][v1][v2]"
+            a_filters = []
+            if has_audio:
+                a_filters = [
+                    f"[0:a]atrim=0:{t0:.3f},asetpts=PTS-STARTPTS[a0]",
+                    f"[0:a]atrim={t0:.3f}:{t1:.3f},asetpts=PTS-STARTPTS,{atempo}[a1]",
+                    f"[0:a]atrim={t1:.3f},asetpts=PTS-STARTPTS[a2]",
+                ]
+                parts = "[v0][a0][v1][a1][v2][a2]"
+            concat = (f"{parts}concat=n=3:v=1:a={1 if has_audio else 0}"
+                      f"[vout]" + ("[aout]" if has_audio else ""))
+            return ";".join(v + a_filters + [concat])
+
+        def _encode(use_interp: bool) -> None:
+            cmd = ["ffmpeg", "-y", "-i", clip_path,
+                   "-filter_complex", _filtergraph(use_interp), "-map", "[vout]"]
+            if has_audio:
+                cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+            cmd += [*ff.venc_args(encoder), out_path]
+            ff.run(cmd, desc="slowmo segment")
+
+        try:
+            _encode(interp)
+        except ff.FFmpegError as exc:
+            if interp:
+                log.warning(f"[composer] minterpolate slow-mo failed ({exc}); "
+                            "retrying with plain frame-stretch")
+                _encode(False)
+            else:
+                raise
         log.info(f"[composer] slow-mo {factor}x on [{t0:.1f}-{t1:.1f}]s "
-                 f"-> {Path(out_path).name}")
+                 f"{'(interpolated) ' if interp else ''}-> {Path(out_path).name}")
         return out_path
 
     # ---------------------------------------------------- 3) typography
@@ -281,8 +296,9 @@ class Composer:
         hook_font = _load_font(font_path, int(h * 0.045))
         plate_font = _load_font(font_path, int(h * 0.026))
 
-        tmp = out_path.replace(".mp4", "_silent.mp4")
-        writer = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        sink = ff.RawFrameSink(out_path, w, h, fps,
+                               ff.pick_encoder(self.cfg["render"]["encoder"]),
+                               audio_src=clip_path)
         hook_frames = int(fps * 2.0)      # show hook ~2s
 
         idx = 0
@@ -296,14 +312,11 @@ class Composer:
                 _draw_hook(draw, img.size, hook, hook_font)
             _draw_plates(draw, img.size, plates, plate_font)
             frame = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
-            writer.write(frame)
+            sink.write(frame)
             idx += 1
             _ = total
         cap.release()
-        writer.release()
-        ff.mux_audio(tmp, clip_path, out_path,
-                     ff.pick_encoder(self.cfg["render"]["encoder"]))
-        Path(tmp).unlink(missing_ok=True)
+        sink.close()
         log.info(f"[composer] pillow typography -> {Path(out_path).name}")
         return out_path
 
@@ -323,7 +336,7 @@ class Composer:
             overlays.append(_moviepy_text(hook, fontsize=int(H * 0.05), font=font,
                                           pos=("center", int(H * 0.10)),
                                           duration=min(2.0, base.duration)))
-        y = int(H * 0.66)
+        y = int(H * 0.58)
         for label in plates:
             overlays.append(_moviepy_text(label, fontsize=int(H * 0.03), font=font,
                                           pos=(int(W * 0.06), y),
@@ -417,7 +430,8 @@ def _draw_plates(draw, size, plates, font):
         return
     W, H = size
     x = int(W * 0.06)
-    y = int(H * 0.66)
+    # stat plates sit in the social safe-zone (above the bottom ~20% UI band)
+    y = int(H * 0.58)
     for label in plates:
         tw, th = _text_size(draw, label, font)
         pad = int(th * 0.45)
