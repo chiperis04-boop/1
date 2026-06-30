@@ -7,7 +7,7 @@ tqdm>=4.66
 
 # ---- video / audio io ----
 ffmpeg-python>=0.2.0
-moviepy>=1.0.3
+# moviepy is pinned in the v2 blueprint stack section below (optional typography).
 opencv-python>=4.9
 librosa>=0.10
 soundfile>=0.12
@@ -29,16 +29,24 @@ scikit-learn>=1.3          # team-classification clustering (vision/teams.py)
 huggingface-hub>=0.23,<1.0 # model downloads (src/modelhub.py); <1.0 keeps HfFolder for gradio
 
 # ---- v2 blueprint stack (detection/tracking/graphics/render packages) ----
+# These are pinned (not just lower-bounded) so the full tree is reproducible,
+# matching the web-stack lock below. Versions verified to co-resolve with the
+# pinned web stack via `uv pip compile requirements.txt` (no conflicts).
 # kornia: pitch homography from line/point correspondences (find_homography_lines_dlt).
 #   Used by src/graphics/homography.py with a cv2.findHomography RANSAC fallback.
-kornia>=0.7.2
+kornia==0.8.3
 # roboflow trackers: optional alternative BoT-SORT backend for src/tracking/cameraman.py.
 #   Default backend is Ultralytics' built-in BoT-SORT (exposes gmc_method), so this is
 #   only needed if you set tracking.backend = "roboflow".
-trackers>=2.0; python_version >= "3.10"
+trackers==2.5.0; python_version >= "3.10"
 # Optional vision-LLM "Director" (src/detection/director.py). Off unless configured;
 # the Director also has an offline heuristic fallback, so this stays optional.
-google-generativeai>=0.7.0
+google-generativeai==0.8.6
+# Premium typography TextClip engine (src/render/composer.py). OPTIONAL: the default
+# typography engine is Pillow (render.typography_engine="pillow"), which needs no
+# MoviePy. The composer's _moviepy_* shims support both 1.x and 2.x APIs; 2.2.x is
+# what co-resolves with this tree.
+moviepy==2.2.1
 
 # ---- web UI ----
 # IMPORTANT: this is a *coherent, internally consistent* lock of the whole web

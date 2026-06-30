@@ -309,9 +309,12 @@ class Composer:
 
     def _typography_moviepy(self, clip_path, out_path, hook, plates):
         """Blueprint-requested MoviePy TextClip engine. Handles both MoviePy 1.x
-        and 2.x signatures; raises on failure so compose() can fall back."""
-        from moviepy import editor as mpy  # type: ignore  # noqa
-        # (import style differs across versions; try both)
+        and 2.x signatures; raises on failure so compose() can fall back.
+
+        NOTE: do NOT import `moviepy.editor` here — it exists only in MoviePy 1.x
+        and was removed in 2.x. The version-agnostic `_moviepy_*` shims below
+        import the concrete classes (trying 2.x first, then 1.x), so this engine
+        works on whichever MoviePy is installed."""
         base = _moviepy_videoclip(clip_path)
         overlays = [base]
         W, H = base.size
