@@ -28,6 +28,8 @@ class PerceptionBundle:
     audio_curve: list[float] = field(default_factory=list)
     audio_events: list[dict] = field(default_factory=list)  # {t,label}
     detections_summary: str = ""
+    ball_visible_frac: float = 1.0     # fraction of frames with a visible ball
+    avg_players: float = 0.0           # mean detected players per frame
     score: dict | None = None
 
     def transcript_text(self) -> str:
@@ -73,6 +75,12 @@ def build_bundle(clip_path: str, cfg: dict | None = None, shots=None,
         keyframes=keyframes, keyframe_times=times,
         detections_summary=summary, score=score,
     )
+    if frames:
+        n = max(1, len(frames))
+        bundle.ball_visible_frac = sum(
+            1 for ft in frames if getattr(ft, "ball", None)) / n
+        bundle.avg_players = sum(
+            len(getattr(ft, "players", [])) for ft in frames) / n
 
     if d.get("use_asr", False):
         bundle.transcript = _transcribe(clip_path, cfg)

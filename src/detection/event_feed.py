@@ -66,8 +66,12 @@ class MatchEvent:
     team: str | None = None
     player: str | None = None
     number: int | None = None
-    importance: float = 0.6
+    importance: float | None = None    # None -> derived from kind (xT-style)
     text: str = ""
+
+    def __post_init__(self):
+        if self.importance is None:
+            self.importance = _default_importance(self.kind)
 
     def match_seconds(self) -> float:
         """Seconds since this period's nominal start (e.g. 2nd-half 67' -> 22*60)."""
@@ -101,6 +105,65 @@ def load_events(source: str | list | dict, cfg: dict | None = None) -> list[Matc
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[event_feed] failed to parse {path}: {exc}")
         return []
+
+
+def load_from_espn(fixture_id, slug: str = "esp.1", cfg: dict | None = None,
+                   timeout: float = 30.0) -> list[MatchEvent]:
+    """Fetch goals/cards (+minutes/scorers) from ESPN's PUBLIC, KEYLESS API.
+
+    Compliance-clean (an open API, not a scrape). Best-effort: returns [] on any
+    failure so the pipeline degrades to other sources. `slug` is ESPN's league
+    code (e.g. esp.1 = La Liga, fifa.world = World Cup). `fixture_id` is the
+    ESPN event id for the match.
+    """
+    try:
+        import requests
+    except Exception:  # noqa: BLE001
+        log.warning("[event_feed] 'requests' unavailable; cannot fetch ESPN")
+        return []
+    url = (f"https://site.api.espn.com/apis/site/v2/sports/soccer/"
+           f"{slug}/summary")
+    try:
+        r = requests.get(url, params={"event": str(fixture_id)}, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[event_feed] ESPN fetch failed ({slug}/{fixture_id}): {exc}")
+        return []
+    events = _espn_keyevents(data)
+    log.info(f"[event_feed] ESPN {slug}/{fixture_id}: {len(events)} events "
+             f"({sum(e.kind == 'goal' for e in events)} goals)")
+    return events
+
+
+def _espn_keyevents(data: dict) -> list[MatchEvent]:
+    """Map ESPN summary 'keyEvents' to MatchEvents (goals + cards)."""
+    out: list[MatchEvent] = []
+    for ke in (data.get("keyEvents") or []):
+        ttype = str(((ke.get("type") or {}).get("text")) or "")
+        minute = _parse_minute((ke.get("clock") or {}).get("displayValue"))
+        if minute is None:
+            continue
+        period = _to_int((ke.get("period") or {}).get("number"))
+        if period is None:
+            period = 2 if minute > 45 else 1
+        team = ((ke.get("team") or {}).get("displayName")) or None
+        parts = ke.get("participants") or [{}]
+        player = ((parts[0].get("athlete") or {}).get("displayName")) or None
+        text = (ke.get("text") or "").strip()
+        if ke.get("scoringPlay") or ttype == "Goal":
+            kind = "goal"
+        elif "card" in ttype.lower():
+            kind = "card"
+        else:
+            kind = _map_kind(ttype) or _map_kind(text)
+        if kind is None:
+            continue
+        out.append(MatchEvent(
+            minute=minute, kind=kind, period=period, team=team, player=player,
+            importance=_default_importance(kind),
+            text=text or f"{minute}' {kind}"))
+    return out
 
 
 def events_to_windows(events: list[MatchEvent], kickoffs: dict, cfg: dict,
@@ -147,6 +210,12 @@ def events_to_windows(events: list[MatchEvent], kickoffs: dict, cfg: dict,
 
     windows.sort(key=lambda w: w.anchor_t)
     windows = _dedupe(windows, float(sc.get("merge_gap_seconds", 15.0)))
+    # xT/importance ranking: keep only the top-N strongest moments (0 = all)
+    top_n = int(ef.get("top_n", 0) or 0)
+    if top_n and len(windows) > top_n:
+        windows = sorted(windows, key=lambda w: w.confidence, reverse=True)[:top_n]
+        windows.sort(key=lambda w: w.anchor_t)
+        log.info(f"[event_feed] kept top {top_n} windows by importance")
     log.info(f"[event_feed] {placed} windows placed from feed "
              f"({skipped} skipped), {sum(w.kind == 'goal' for w in windows)} goals")
     return windows
@@ -268,6 +337,14 @@ def _map_kind(text: str) -> str | None:
 def _default_importance(kind: str) -> float:
     return {"goal": 1.0, "save": 0.8, "card": 0.7, "skill": 0.7,
             "chance": 0.6}.get(kind, 0.5)
+
+
+def _parse_minute(v):
+    """Leading match minute from an ESPN/feed clock string ("45+2'" -> 45)."""
+    if v is None:
+        return None
+    m = re.match(r"\s*(\d{1,3})", str(v))
+    return int(m.group(1)) if m else None
 
 
 def _to_int(v):

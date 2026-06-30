@@ -70,11 +70,19 @@ def scout_events(
     #    when available. Map match-clock events to video time via kick-off
     #    offsets (ClipMaker-style), optionally snapped to the OCR score clock.
     ef = cfg.get("detect", {}).get("event_feed", {})
-    if ef.get("enabled") and ef.get("source"):
+    if ef.get("enabled"):
         try:
-            from .event_feed import align_to_ocr, events_to_windows, load_events
-            events = load_events(ef["source"], cfg)
-            fw = events_to_windows(events, ef.get("kickoffs", {}), cfg, duration)
+            from .event_feed import (align_to_ocr, events_to_windows,
+                                     load_events, load_from_espn)
+            events = []
+            espn = ef.get("espn", {}) or {}
+            if espn.get("enabled") and espn.get("fixture_id"):
+                events = load_from_espn(espn.get("fixture_id"),
+                                        espn.get("slug", "esp.1"), cfg)
+            elif ef.get("source"):
+                events = load_events(ef["source"], cfg)
+            fw = events_to_windows(events, ef.get("kickoffs", {}), cfg, duration) \
+                if events else []
             if fw:
                 if ef.get("align_to_ocr", True):
                     try:

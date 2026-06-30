@@ -94,6 +94,14 @@ detect:
     min_importance: 0.0           # drop feed events below this xT/importance
     align_to_ocr: true            # snap goal windows to the scoreboard OCR clock
     ocr_align_radius_seconds: 40.0
+    top_n: 0                      # keep only the N strongest moments (0 = all)
+    # ESPN public (keyless) source — goals/cards+minutes for current seasons.
+    # Compliance-clean (open API, not a scrape). slug: esp.1=La Liga,
+    # fifa.world=World Cup. fixture_id = ESPN event id for the match.
+    espn:
+      enabled: false
+      slug: esp.1
+      fixture_id: null
 
 fusion:
   # final score = weighted sum of normalized signal strengths
@@ -281,6 +289,11 @@ director:
   use_asr: false                # transcribe commentary (faster-whisper) for context
   asr_model: base               # faster-whisper model id when use_asr=true
   allow_curation: true          # let the Director drop clips it judges non-highlights
+  # offline cutaway/bench safety net (drops a clip with almost no ball AND very
+  # few players on screen; never drops a score-verified goal). Works without VLM.
+  drop_cutaways: true
+  cutaway_min_ball_frac: 0.05
+  cutaway_min_players: 3.0
   # offline hook fallbacks if no LLM and no brand hooks
   hooks: {}
 

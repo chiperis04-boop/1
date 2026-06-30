@@ -49,7 +49,8 @@ def plan_edit(bundle, window=None, cfg: dict | None = None, track=None,
     client = client or VisionLLMClient(cfg)
 
     if not client.is_configured():
-        return heuristic_plan(bundle, window, cfg, track)
+        return _cutaway_gate(heuristic_plan(bundle, window, cfg, track),
+                             bundle, window, cfg)
 
     try:
         text = _context(bundle, window)
@@ -57,13 +58,37 @@ def plan_edit(bundle, window=None, cfg: dict | None = None, track=None,
         plan = EditPlan.coerce(raw, source=client.backend,
                                duration=float(getattr(bundle, "duration", 0.0) or 0.0))
         plan = _post(plan, bundle, window, cfg, track)
+        plan = _cutaway_gate(plan, bundle, window, cfg)
         log.info(f"[director] EditPlan via {client.backend}: event={plan.event} "
                  f"keep={plan.keep_clip} hook='{plan.hook_text}' "
                  f"beats={len(plan.slowmo_beats)} shots={len(plan.shots)}")
         return plan
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[director] vision backend failed ({exc}); heuristic plan")
-        return heuristic_plan(bundle, window, cfg, track)
+        return _cutaway_gate(heuristic_plan(bundle, window, cfg, track),
+                             bundle, window, cfg)
+
+
+def _cutaway_gate(plan: EditPlan, bundle, window, cfg) -> EditPlan:
+    """Offline safety net against bench/cutaway/crowd clips (the '20s of bench'
+    bug). Drops a window with almost no ball AND very few players on screen —
+    UNLESS it's a score-verified goal (a real goal's celebration also has no
+    ball, so confirmed goals are never dropped here). Works without the VLM."""
+    d = cfg.get("director", {})
+    if not d.get("drop_cutaways", True):
+        return plan
+    if window is not None and getattr(window, "verified", False):
+        return plan
+    bvf = getattr(bundle, "ball_visible_frac", None)
+    avgp = getattr(bundle, "avg_players", None)
+    if bvf is None or avgp is None:
+        return plan
+    if bvf < float(d.get("cutaway_min_ball_frac", 0.05)) \
+            and avgp < float(d.get("cutaway_min_players", 3.0)):
+        plan.keep_clip = False
+        log.info(f"[director] cutaway gate: dropped clip "
+                 f"(ball {bvf:.0%} of frames, ~{avgp:.1f} players)")
+    return plan
 
 
 # --------------------------------------------------------------------------- #

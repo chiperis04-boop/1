@@ -87,10 +87,73 @@ def test_ocr_alignment_corrects_drift():
     print("  \u2713 OCR clock snaps feed goal window, corrects kick-off drift")
 
 
+def test_espn_keyevents_parsing():
+    from src.detection.event_feed import _espn_keyevents
+    summary = {"keyEvents": [
+        {"type": {"text": "Goal"}, "clock": {"displayValue": "23'"},
+         "team": {"displayName": "Barcelona"}, "scoringPlay": True,
+         "participants": [{"athlete": {"displayName": "Lewandowski"}}],
+         "text": "Goal! Barcelona 1, Madrid 0."},
+        {"type": {"text": "Yellow Card"}, "clock": {"displayValue": "45+2'"},
+         "period": {"number": 1}, "team": {"displayName": "Madrid"},
+         "participants": [{"athlete": {"displayName": "Rodrigo"}}]},
+        {"type": {"text": "Goal"}, "clock": {"displayValue": "70'"},
+         "period": {"number": 2}, "scoringPlay": True,
+         "participants": [{"athlete": {"displayName": "Yamal"}}]},
+        {"type": {"text": "Substitution"}, "clock": {"displayValue": "60'"}},  # dropped
+    ]}
+    events = _espn_keyevents(summary)
+    kinds = [e.kind for e in events]
+    assert kinds == ["goal", "card", "goal"], kinds
+    # "45+2'" -> leading minute 45, explicit period 1 (stoppage stays 1st half)
+    card = events[1]
+    assert card.minute == 45 and card.period == 1, (card.minute, card.period)
+    g2 = events[2]
+    assert g2.minute == 70 and g2.period == 2 and g2.player == "Yamal"
+    print("  \u2713 ESPN keyEvents -> goals/cards parsed; 45+2 & period handled; sub dropped")
+
+
+def test_top_n_selection():
+    events = [MatchEvent(minute=m, kind=k, period=1)
+              for m, k in [(5, "chance"), (20, "goal"), (35, "card"), (40, "goal")]]
+    cfg = {"detect": {"scout": dict(CFG["detect"]["scout"]),
+                      "event_feed": {"top_n": 2}}}
+    ws = events_to_windows(events, {1: 0}, cfg, duration=6000)
+    assert len(ws) == 2, len(ws)
+    # the two goals (importance 1.0) outrank the chance/card
+    assert all(w.kind == "goal" for w in ws), [w.kind for w in ws]
+    # still returned in chronological order
+    assert ws[0].anchor_t < ws[1].anchor_t
+    print("  \u2713 top_n keeps the 2 strongest moments (goals), chronological")
+
+
+def test_cutaway_gate():
+    from types import SimpleNamespace
+    from src.agents.director_agent import _cutaway_gate
+    cfg = {"director": {"drop_cutaways": True, "cutaway_min_ball_frac": 0.05,
+                       "cutaway_min_players": 3.0}}
+    bench = SimpleNamespace(ball_visible_frac=0.0, avg_players=1.5)
+    play = SimpleNamespace(ball_visible_frac=0.6, avg_players=8.0)
+    # bench-like, unverified -> dropped
+    p = _cutaway_gate(SimpleNamespace(keep_clip=True), bench, None, cfg)
+    assert p.keep_clip is False
+    # real play -> kept
+    p = _cutaway_gate(SimpleNamespace(keep_clip=True), play, None, cfg)
+    assert p.keep_clip is True
+    # bench-like BUT score-verified goal (celebration) -> never dropped
+    goal = SimpleNamespace(verified=True)
+    p = _cutaway_gate(SimpleNamespace(keep_clip=True), bench, goal, cfg)
+    assert p.keep_clip is True
+    print("  \u2713 cutaway gate drops bench/crowd, keeps real play & verified goals")
+
+
 if __name__ == "__main__":
     test_text_parsing()
     test_csv_and_importance()
     test_clock_to_video_mapping()
     test_missing_kickoff_skips()
     test_ocr_alignment_corrects_drift()
+    test_espn_keyevents_parsing()
+    test_top_n_selection()
+    test_cutaway_gate()
     print("\nALL EVENT-FEED TESTS PASSED \u2705")
