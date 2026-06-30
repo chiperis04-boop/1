@@ -159,6 +159,7 @@ class Composer:
             return frame
         default_color = tuple(tele.get("spotlight_color", [0, 220, 255]))
         team_halos = tele.get("team_halos", True) and analytics is not None
+        grounded = tele.get("halo_grounded", True)
 
         # team-coloured halo under EVERY player (club colours), if known
         if team_halos:
@@ -167,7 +168,8 @@ class Composer:
                     continue
                 col = analytics.color_for_track(p["id"], default_color)
                 self._foot_ellipse(frame, p["xyxy"], col,
-                                   max(1, tele.get("line_thickness", 2) - 1))
+                                   max(1, tele.get("line_thickness", 2) - 1),
+                                   grounded=grounded)
 
         # hero halo (thicker; team colour if available) + jersey number label.
         # Use a temporally-smoothed/persistent box so the halo doesn't flicker
@@ -181,7 +183,7 @@ class Composer:
                 col = (analytics.color_for_track(hero_id, default_color)
                        if analytics is not None else default_color)
                 self._foot_ellipse(frame, hero["xyxy"], col,
-                                   tele.get("line_thickness", 2))
+                                   tele.get("line_thickness", 2), grounded=grounded)
                 num = (analytics.jerseys.number_of.get(hero_id)
                        if analytics is not None else None)
                 if num is not None:
@@ -210,12 +212,18 @@ class Composer:
         return frame
 
     @staticmethod
-    def _foot_ellipse(frame, xyxy, color, thickness):
+    def _foot_ellipse(frame, xyxy, color, thickness, grounded=True):
+        """Thin ring at the player's feet. When `grounded`, only the LOWER arc
+        is drawn (0..180deg) so the ring reads as lying on the grass UNDER the
+        boots instead of overlapping the legs/body — a seg-mask-free occlusion
+        approximation. Full seg-mask under-player compositing (homography.
+        composite_under_players) is the GPU follow-up."""
         import cv2
         x1, y1, x2, y2 = (int(v) for v in xyxy)
         cx, cyb = int((x1 + x2) / 2), int(y2)
         axes = (max(8, int((x2 - x1) * 0.6)), max(4, int((x2 - x1) * 0.22)))
-        cv2.ellipse(frame, (cx, cyb), axes, 0, 0, 360,
+        start, end = (0, 180) if grounded else (0, 360)
+        cv2.ellipse(frame, (cx, cyb), axes, 0, start, end,
                     tuple(int(c) for c in color), thickness, cv2.LINE_AA)
 
     def _draw_possession_plate(self, frame, ft, analytics):

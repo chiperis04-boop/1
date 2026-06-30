@@ -158,6 +158,9 @@ vision:
     min_points: 4
     sample_every_frames: 1
     smoothing: 0.8
+    validate: true              # reject implausible homographies ("lines into sky")
+    validate_margin_m: 40.0     # image corners must map within pitch + this margin (m)
+    validate_max_cond: 10000000 # max condition number of H before it's rejected
 
   # ---- team classification -> possession-aware protagonist (L3) ----
   teams:
@@ -189,6 +192,8 @@ telestration:
   line_thickness: 2             # SLEEK halos: thin outline (<=2px), not heavy
   team_halos: true              # colour every player's halo in their club colour
                                 # (from vision.teams); hero gets a slightly thicker ring
+  halo_grounded: true           # draw only the lower arc so rings sit UNDER the
+                                # boots on the grass (seg-mask-free occlusion)
   # Vivid NEON team palette (BGR), assigned by team label so rings read clearly
   # on broadcast (instead of the muddy median-jersey colour). team0 / team1 / ...
   team_palette:

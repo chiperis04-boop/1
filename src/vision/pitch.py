@@ -56,6 +56,40 @@ PITCH_TEMPLATE: dict[str, tuple[float, float]] = {
 TEMPLATE_POINTS = np.array(list(PITCH_TEMPLATE.values()), dtype=np.float32)
 
 
+def valid_homography(H, img_w: float, img_h: float, length: float = PITCH_LENGTH,
+                     width: float = PITCH_WIDTH, margin: float = 40.0,
+                     max_cond: float = 1e7) -> bool:
+    """Reject implausible homographies (the 'tactical lines into the sky' bug).
+
+    A trustworthy image->pitch H must (a) be finite & well-conditioned and
+    (b) map the four image corners to pitch metres that stay within the pitch
+    rectangle plus a generous margin. A degenerate/over-fit H sends corners to
+    huge/NaN coordinates -> rejected, so no garbage graphics are ever drawn.
+    """
+    if H is None or not np.all(np.isfinite(np.asarray(H, dtype=np.float64))):
+        return False
+    H = np.asarray(H, dtype=np.float64)
+    try:
+        cond = np.linalg.cond(H)
+    except Exception:  # noqa: BLE001
+        return False
+    if not np.isfinite(cond) or cond > max_cond:
+        return False
+    corners = np.array([[0, 0, 1], [img_w, 0, 1], [img_w, img_h, 1],
+                        [0, img_h, 1]], dtype=np.float64).T   # 3x4
+    proj = H @ corners
+    w3 = proj[2]
+    if np.any(np.abs(w3) < 1e-9):
+        return False
+    xy = (proj[:2] / w3).T                                    # 4x2 pitch metres
+    if not np.all(np.isfinite(xy)):
+        return False
+    xmin, ymin = xy.min(axis=0)
+    xmax, ymax = xy.max(axis=0)
+    return not (xmin < -margin or ymin < -margin
+                or xmax > length + margin or ymax > width + margin)
+
+
 @dataclass
 class FrameHomography:
     idx: int
@@ -157,4 +191,16 @@ class PitchEstimator:
         img_pts = np.array(img_pts, dtype=np.float32)
         tmpl_pts = np.array(tmpl_pts, dtype=np.float32)
         H, _ = cv2.findHomography(img_pts, tmpl_pts, cv2.RANSAC, 5.0)
+        if H is None:
+            return None
+        # reject implausible projections ('lines into the sky') unless disabled
+        pj = self.cfg.get("vision", {}).get("pitch", {})
+        if pj.get("validate", True):
+            h_img, w_img = frame.shape[:2]
+            if not valid_homography(
+                    H, w_img, h_img,
+                    margin=float(pj.get("validate_margin_m", 40.0)),
+                    max_cond=float(pj.get("validate_max_cond", 1e7))):
+                log.debug("[pitch] rejected implausible homography for a frame")
+                return None
         return H
