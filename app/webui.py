@@ -243,7 +243,7 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
         # closing the browser / a dropped session never kills the render.
         if _JOB_LAUNCHER is not None:
             try:
-                _JOB_LAUNCHER(match_name, profile, int(limit), overrides)
+                _JOB_LAUNCHER(dst.name, profile, int(limit), overrides)
                 yield (f"▶ Серверная задача запущена для «{match_name}».\n"
                        "Она НЕ упадёт при закрытии вкладки или обрыве связи.\n"
                        "Нажимайте «↻ Статус / результаты» ниже, чтобы видеть "

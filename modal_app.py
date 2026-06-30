@@ -319,7 +319,16 @@ def studio_job(name: str, profile: str = "tiktok", limit: int = 0,
     def _write(d):
         status.write_text(json.dumps(d), encoding="utf-8")
 
+    try:
+        input_vol.reload()                  # see files just committed by the WebUI
+    except Exception:  # noqa: BLE001
+        pass
     local = os.path.join("input", name)
+    if not os.path.exists(local):           # tolerate a stem (e.g. '4' -> '4.mp4')
+        import glob
+        cands = sorted(glob.glob(os.path.join("input", Path(name).stem + ".*")))
+        if cands:
+            local = cands[0]
     if not os.path.exists(local):
         _write({"stage": "error", "status": "failed", "done": True,
                 "error": f"{name} not found on the fhs-input Volume"})
