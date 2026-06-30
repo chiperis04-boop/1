@@ -314,6 +314,29 @@ def test_hero_halo_persistence():
     print("  ✓ hero halo persists across short gaps then releases (no flicker)")
 
 
+def test_per_shot_zoom_sizes():
+    """Director per-shot zoom must change the crop size per shot (punch-in)."""
+    from src.agents.editplan import ShotEdit
+    from src.perception.shots import Shot
+    from src.tracking.cameraman import Cameraman, FrameTrack
+    cfg = {"edit": {"reframe": {"target_aspect": "9:16"}}, "tracking": {},
+           "_active_profile": {"width": 1080, "height": 1920}}
+    cam = Cameraman(cfg)
+    n = 60
+    frames = [FrameTrack(idx=i, players=[{"id": 1, "cls": 0,
+                                          "xyxy": [600, 300, 640, 400],
+                                          "center": [620, 350]}])
+              for i in range(n)]
+    meta = {"w": 1280, "h": 720, "fps": 30.0}
+    shots = [Shot(0, 0, 1, 0, 30), Shot(1, 1, 2, 30, 60)]
+    edits = [ShotEdit(0, zoom=1.0), ShotEdit(1, zoom=2.0)]   # punch-in on shot 2
+    plan = cam.build_plan(frames, meta, hero_id=1, shots=shots, shot_edits=edits)
+    base_cw = plan.sizes[0][0]
+    tight_cw = plan.sizes[45][0]
+    assert tight_cw < base_cw and abs(tight_cw - base_cw / 2) <= 2, (base_cw, tight_cw)
+    print(f"  ✓ per-shot zoom: crop {base_cw}px -> {tight_cw}px on the punch-in shot")
+
+
 def test_team_colors():
     ta = TeamAssignment(team_of={7: 0, 9: 1}, colors={0: (255, 0, 0), 1: (0, 0, 255)})
     assert ta.color_for_track(7) == (255, 0, 0)
@@ -376,6 +399,7 @@ def main() -> int:
         test_jersey_track_for_number_prefers_confidence,
         test_hero_resolution_priority,
         test_hero_halo_persistence,
+        test_per_shot_zoom_sizes,
         test_team_colors,
         test_pick_key_player_restricts_to_attacking_team,
         test_scout_dedupe_merges_cluster,

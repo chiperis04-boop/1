@@ -59,14 +59,22 @@ class Composer:
         return self.finish(cur, out_path, manifest, stats)
 
     def finish(self, clip_path: str, out_path: str, manifest=None,
-               stats: dict | None = None) -> str:
+               stats: dict | None = None, beats=None) -> str:
         """Space-independent passes: audio-safe slow-mo + premium typography.
-        Safe to run on an already-reframed (9:16) clip."""
+        Safe to run on an already-reframed (9:16) clip.
+
+        `beats` (list of agents.SlowmoBeat) enables MULTI-beat slow-mo from the
+        Director; if omitted, falls back to the single manifest beat."""
         work = Path(out_path).with_suffix("")
         slowmo_mp4 = f"{work}_slomo.mp4"
         cur = clip_path
-        if manifest is not None and self.cfg.get("edit", {}).get("effects", {}) \
-                .get("slowmo_on_key", True):
+        slowmo_on = self.cfg.get("edit", {}).get("effects", {}).get("slowmo_on_key", True)
+        if slowmo_on and beats:
+            try:
+                cur = self._slowmo_multi(cur, slowmo_mp4, beats)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[composer] multi-beat slow-mo skipped: {exc}")
+        elif slowmo_on and manifest is not None:
             try:
                 cur = self._slowmo_segment(
                     cur, slowmo_mp4,
@@ -302,6 +310,70 @@ class Composer:
                 raise
         log.info(f"[composer] slow-mo {factor}x on [{t0:.1f}-{t1:.1f}]s "
                  f"{'(interpolated) ' if interp else ''}-> {Path(out_path).name}")
+        return out_path
+
+    # ---------------------------------------------------- 2b) multi-beat slow-mo
+    def _slowmo_multi(self, clip_path, out_path, beats):
+        """Apply several slow-mo windows (the Director's decisive beats) in one
+        pass: the timeline is split into alternating normal/slow segments and
+        concatenated. Pitch-preserving audio (atempo chain); motion-interpolated
+        video (with graceful fallback to plain stretch)."""
+        total = ff.duration(clip_path)
+        if total <= 0:
+            return clip_path
+        segs = _segments_from_beats(beats, total)
+        if not any(f is not None for _, _, f in segs):
+            return clip_path
+        has_audio = ff.has_audio(clip_path)
+        out_fps = int(self.cfg["render"]["fps"])
+        eff = self.cfg.get("edit", {}).get("effects", {})
+        interp = bool(eff.get("slowmo_interpolate", True))
+        quality = eff.get("slowmo_interpolation_quality", "mci")
+        encoder = ff.pick_encoder(self.cfg["render"]["encoder"])
+        n = len(segs)
+
+        def _filtergraph(use_interp: bool) -> str:
+            v, a = [], []
+            for i, (s, e, f) in enumerate(segs):
+                if f is None:
+                    v.append(f"[0:v]trim={s:.3f}:{e:.3f},setpts=PTS-STARTPTS[v{i}]")
+                else:
+                    slow = f"setpts={1.0 / f:.4f}*(PTS-STARTPTS)"
+                    if use_interp:
+                        slow += "," + ff.minterpolate_expr(out_fps, quality)
+                    v.append(f"[0:v]trim={s:.3f}:{e:.3f},{slow}[v{i}]")
+                if has_audio:
+                    af = (f"[0:a]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS"
+                          + (f",{_atempo_chain(f)}" if f is not None else "")
+                          + f"[a{i}]")
+                    a.append(af)
+            if has_audio:
+                join = "".join(f"[v{i}][a{i}]" for i in range(n))
+                concat = f"{join}concat=n={n}:v=1:a=1[vout][aout]"
+            else:
+                join = "".join(f"[v{i}]" for i in range(n))
+                concat = f"{join}concat=n={n}:v=1:a=0[vout]"
+            return ";".join(v + a + [concat])
+
+        def _encode(use_interp: bool) -> None:
+            cmd = ["ffmpeg", "-y", "-i", clip_path,
+                   "-filter_complex", _filtergraph(use_interp), "-map", "[vout]"]
+            if has_audio:
+                cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+            cmd += [*ff.venc_args(encoder, intermediate=True), out_path]
+            ff.run(cmd, desc="slowmo multi")
+
+        try:
+            _encode(interp)
+        except ff.FFmpegError as exc:
+            if interp:
+                log.warning(f"[composer] multi-beat minterpolate failed ({exc}); "
+                            "retrying plain stretch")
+                _encode(False)
+            else:
+                raise
+        n_slow = sum(1 for _, _, f in segs if f is not None)
+        log.info(f"[composer] {n_slow} slow-mo beat(s) -> {Path(out_path).name}")
         return out_path
 
     # ---------------------------------------------------- 3) typography
@@ -544,6 +616,43 @@ def _moviepy_composite(clips):
 
 
 # --------------------------------------------------------------------------- #
+def _segments_from_beats(beats, total: float):
+    """Turn slow-mo beats into a contiguous segment list tiling [0,total].
+
+    Returns [(start, end, factor_or_None)] where None = play at normal speed.
+    Beats are clamped to [0,total], sorted, and overlaps are clipped so the
+    segments never overlap.
+    """
+    norm = []
+    for b in beats or []:
+        s = max(0.0, float(getattr(b, "start", 0.0)))
+        e = min(total, float(getattr(b, "end", 0.0)))
+        f = float(getattr(b, "factor", 0.4))
+        if e > s:
+            norm.append((s, e, min(max(f, 0.1), 1.0)))
+    norm.sort(key=lambda x: x[0])
+    # clip overlaps
+    clipped = []
+    cursor = 0.0
+    for s, e, f in norm:
+        s = max(s, cursor)
+        if e <= s:
+            continue
+        clipped.append((s, e, f))
+        cursor = e
+    # build full timeline with normal-speed gaps
+    segs = []
+    cursor = 0.0
+    for s, e, f in clipped:
+        if s > cursor + 1e-3:
+            segs.append((cursor, s, None))
+        segs.append((s, e, f))
+        cursor = e
+    if cursor < total - 1e-3:
+        segs.append((cursor, total, None))
+    return segs or [(0.0, total, None)]
+
+
 def _atempo_chain(factor: float) -> str:
     """Build an atempo filter chain for an arbitrary slow factor.
 

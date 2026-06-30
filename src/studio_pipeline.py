@@ -32,12 +32,13 @@ from pathlib import Path
 from typing import Callable
 
 from .detect.types import Moment
-from .detection.director import generate_manifest
+from .agents.director_agent import plan_edit
 from .detection.scout import EventWindow, scout_events
 from .edit import ff
 from .edit.clipper import extract_clips
 from .graphics.homography import compute_homography
 from .ingest import ingest
+from .perception.bundle import build_bundle
 from .render.composer import Composer
 from .tracking.cameraman import Cameraman
 from .utils.io import (ensure_dir, get_logger, load_branding, load_config,
@@ -166,9 +167,11 @@ def run_studio(
         result.clips.append(sc)
 
     ok = sum(c.status == "ok" for c in result.clips)
-    result.status = "ok" if ok else "failed"
+    skipped = sum(c.status == "skipped" for c in result.clips)
+    result.status = "ok" if (ok or skipped) else "failed"
     save_json(result.to_dict(), Path(out_dir) / "studio_result.json")
-    emit("done", 100, f"finished {ok}/{n} highlights")
+    emit("done", 100, f"finished {ok}/{n} highlights"
+         + (f", {skipped} dropped by Director" if skipped else ""))
     return result
 
 
@@ -190,9 +193,15 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         # geometric hero + crop reset per shot (no glide across cuts)
         plan0 = cam.build_plan(frames, meta, shots=shots)
 
-        stage = "director"                  # LLM/heuristic editing manifest
-        manifest = generate_manifest(clip, window=w, cfg=cfg, track=plan0)
-        sc.manifest = manifest.to_dict()
+        stage = "director"                  # frame-aware EditPlan (VLM or heuristic)
+        bundle = build_bundle(clip, cfg, shots=shots, frames=frames, window=w)
+        plan = plan_edit(bundle, window=w, cfg=cfg, track=plan0)
+        manifest = plan.to_manifest()       # bridge for graphics/typography
+        sc.manifest = plan.to_dict()
+        if not plan.keep_clip and cfg.get("director", {}).get("allow_curation", True):
+            sc.status = "skipped"
+            log.info(f"[studio] clip {i} dropped by Director (not a highlight)")
+            return
 
         stage = "homography"                # optional grass-anchor + metric calib
         homography = compute_homography(clip, cfg) if _graphics_on(cfg) else None
@@ -206,21 +215,22 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         sc.hero_source = analytics.hero_source
         sc.possession_pct = analytics.possession_share_pct()
 
-        stage = "replan"                    # re-centre the crop on the real hero
-        plan = cam.build_plan(frames, meta, hero_id=analytics.hero_id, shots=shots)
+        stage = "replan"                    # re-centre on hero + per-shot zoom
+        crop_plan = cam.build_plan(frames, meta, hero_id=analytics.hero_id,
+                                   shots=shots, shot_edits=plan.shots)
 
         stage = "graphics+reframe"          # ONE pass: world graphics -> CMC crop
         world = screen = None               #            -> screen HUD (no extra encode)
         if cfg.get("telestration", {}).get("enabled", True):
-            world, screen = composer.make_annotators(plan, manifest, analytics)
-        reframed = cam.render(clip, plan, str(work / "reframed.mp4"),
+            world, screen = composer.make_annotators(crop_plan, manifest, analytics)
+        reframed = cam.render(clip, crop_plan, str(work / "reframed.mp4"),
                               annotate_world=world, annotate_screen=screen,
                               intermediate=True)
 
-        stage = "finish"                    # slow-mo + premium typography
+        stage = "finish"                    # multi-beat slow-mo + premium typography
         final = str(Path(out_dir) / f"{i:02d}_{w.kind}.mp4")
         composer.finish(reframed, final, manifest=manifest,
-                        stats=_stats_from(analytics))
+                        stats=_stats_from(analytics), beats=plan.slowmo_beats)
 
         stage = "branding"                  # reuse v1 intro/outro/lower-thirds
         try:

@@ -58,12 +58,18 @@ class CropPlan:
     hero_id: int | None
     # per-frame top-left of the crop window (len == n_frames)
     boxes: list[tuple[int, int]] = field(default_factory=list)
+    # optional per-frame crop size (w,h) for per-shot zoom; falls back to crop_w/h
+    sizes: list[tuple[int, int]] = field(default_factory=list)
     frames: list[FrameTrack] = field(default_factory=list)
 
     def box_at(self, idx: int) -> tuple[int, int, int, int]:
         i = min(max(idx, 0), len(self.boxes) - 1)
         x0, y0 = self.boxes[i]
-        return x0, y0, self.crop_w, self.crop_h
+        if self.sizes:
+            cw, ch = self.sizes[min(i, len(self.sizes) - 1)]
+        else:
+            cw, ch = self.crop_w, self.crop_h
+        return x0, y0, cw, ch
 
 
 class Cameraman:
@@ -97,13 +103,15 @@ class Cameraman:
         return self._track_ultralytics(clip_path)
 
     def build_plan(self, frames, meta, hero_id: int | None = None,
-                   shots=None) -> CropPlan:
+                   shots=None, shot_edits=None) -> CropPlan:
         """Plan the smoothed 9:16 crop around an explicit hero track id.
 
-        `shots` (optional list of perception.Shot) makes the crop path smooth
-        each shot INDEPENDENTLY so the virtual camera resets at every broadcast
-        cut instead of gliding across it."""
-        return self._plan_from_frames(frames, meta, hero_hint=hero_id, shots=shots)
+        `shots` (perception.Shot list) makes the crop reset at every broadcast
+        cut. `shot_edits` (agents.ShotEdit list, one per shot) sets a per-shot
+        zoom/framing so the Director can punch in on close-ups or stay wide on
+        tactical shots."""
+        return self._plan_from_frames(frames, meta, hero_hint=hero_id,
+                                      shots=shots, shot_edits=shot_edits)
 
     # --- Ultralytics BoT-SORT with GMC (default) -------------------------- #
     def _track_ultralytics(self, clip_path: str):
@@ -224,7 +232,7 @@ class Cameraman:
 
     # ------------------------------------------------------------- planning
     def _plan_from_frames(self, frames, meta, hero_hint: int | None = None,
-                          shots=None):
+                          shots=None, shot_edits=None):
         w, h, fps = meta["w"], meta["h"], meta["fps"]
         aspect = self.cfg.get("edit", {}).get("reframe", {}).get("target_aspect", "9:16")
         aw, ah = (int(x) for x in aspect.split(":"))
@@ -233,26 +241,41 @@ class Cameraman:
 
         hero_id = hero_hint if hero_hint is not None else _pick_hero(frames)
         focus = _focus_points(frames, hero_id, w, h)
+        n = len(frames)
 
         # per-shot smoothing segments (reset the camera at every cut)
         segments = None
         if shots:
             from ..perception.shots import frame_segments
-            segments = frame_segments(shots, len(frames))
+            segments = frame_segments(shots, n)
+
+        # per-frame crop size from the Director's per-shot zoom/framing
+        cw_arr = np.full(n, float(crop_w))
+        ch_arr = np.full(n, float(crop_h))
+        if shot_edits and segments:
+            for si, (a, b) in enumerate(segments):
+                se = shot_edits[si] if si < len(shot_edits) else None
+                if se is None:
+                    continue
+                z = max(0.6, min(2.5, float(getattr(se, "zoom", 1.0))))
+                if getattr(se, "framing", "") == "letterbox_wide":
+                    z = min(z, 1.0)            # never tighter than full for wide
+                cw_arr[a:b] = min(w, crop_w / z)
+                ch_arr[a:b] = min(h, crop_h / z)
 
         # Kalman-smoothed camera path (constant-velocity); EMA fallback
         cx, cy = _kalman_smooth(focus[:, 0], focus[:, 1],
                                 fps=fps, cfg=self.t, segments=segments)
-        half_w, half_h = crop_w / 2.0, crop_h / 2.0
-        cx = np.clip(cx, half_w, w - half_w)
-        cy = np.clip(cy, half_h, h - half_h)
+        cx = np.clip(cx, cw_arr / 2.0, w - cw_arr / 2.0)
+        cy = np.clip(cy, ch_arr / 2.0, h - ch_arr / 2.0)
 
         prof = self.cfg.get("_active_profile", {"width": 1080, "height": 1920})
-        boxes = [(int(round(x - half_w)), int(round(y - half_h)))
-                 for x, y in zip(cx, cy)]
+        boxes = [(int(round(x - cw / 2.0)), int(round(y - ch / 2.0)))
+                 for x, y, cw, ch in zip(cx, cy, cw_arr, ch_arr)]
+        sizes = [(int(round(cw)), int(round(ch))) for cw, ch in zip(cw_arr, ch_arr)]
         return CropPlan(src_w=w, src_h=h, fps=fps, crop_w=crop_w, crop_h=crop_h,
                         out_w=prof["width"], out_h=prof["height"], hero_id=hero_id,
-                        boxes=boxes, frames=frames)
+                        boxes=boxes, sizes=sizes, frames=frames)
 
     def _botsort_yaml(self) -> str:
         """Write a BoT-SORT tracker config with GMC enabled and return its path.

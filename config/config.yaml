@@ -235,12 +235,17 @@ render:
 
 # ---- Director: vision-LLM editing manifest ----
 director:
-  backend: heuristic            # heuristic | gemini | openai (MiniCPM/local)
+  backend: heuristic            # heuristic | gemini | openai (MiniCPM/Qwen2-VL/local)
   model: gemini-1.5-flash       # gemini model id, or openai/local model name
-  base_url: null                # OpenAI-compatible endpoint (e.g. local MiniCPM-V)
+  base_url: null                # OpenAI-compatible endpoint (e.g. local vLLM)
   sample_fps: 1.0               # frames/sec fed to the model
   max_frames: 16
   temperature: 0.4
+  max_retries: 2                # vision-LLM JSON call retries before fallback
+  timeout: 60                   # seconds per vision-LLM call
+  use_asr: false                # transcribe commentary (faster-whisper) for context
+  asr_model: base               # faster-whisper model id when use_asr=true
+  allow_curation: true          # let the Director drop clips it judges non-highlights
   # offline hook fallbacks if no LLM and no brand hooks
   hooks: {}
 

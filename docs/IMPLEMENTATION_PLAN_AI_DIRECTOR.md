@@ -276,3 +276,40 @@ Done in this pass (deterministic, no GPU needed; new/updated tests all green):
 Not yet done (still ○, needs the L40S + local models): P1 (Director agent +
 EditPlan + perception bundle), P2 (QA + critic loop), P3 (action spotting,
 cross-shot Re-ID, music sync).
+
+
+---
+
+## Appendix — P1 status (plumbing implemented & CPU-verified; VLM ○ GPU)
+
+The frame-aware Director is now wired end-to-end. The decision-making model
+itself needs the L40S + a local VLM to judge quality, but ALL the plumbing is
+implemented, mockable and unit-tested on CPU so GPU bring-up is configuration:
+
+- **EditPlan schema** — `src/agents/editplan.py` (`EditPlan`/`ShotEdit`/
+  `SlowmoBeat`) with strict `coerce()` (clamps/defaults, validates beats),
+  `heuristic_plan()` offline fallback, and `to_manifest()` bridge to the existing
+  Composer. `tests/test_agents.py`.
+- **PerceptionBundle** — `src/perception/bundle.py`: shots + keyframes (denser
+  around the decisive beat) + detection summary + optional ASR transcript
+  (faster-whisper, guarded) + score. CPU-safe (heavy parts lazy).
+- **Vision-LLM client** — `src/agents/llm_client.py`: OpenAI-compatible
+  (vLLM/Ollama/LM Studio serving Qwen2-VL/MiniCPM-V) + Gemini, JSON-mode,
+  retries, tolerant `parse_json`, `is_configured()`. Transport mockable.
+- **Director agent** — `src/agents/director_agent.py` `plan_edit(bundle, window,
+  cfg, track, client)`: builds the multimodal prompt, coerces the reply to an
+  EditPlan, fills gaps, and **falls back to the heuristic** on any failure / when
+  unconfigured. Verified with a mock vision client + failure/fallback paths.
+- **Executor generalised** — Cameraman `build_plan(shot_edits=)` applies a
+  **per-shot zoom/framing** (punch-in vs wide) via per-frame crop sizes (verified
+  405px→202px on a zoom=2 shot); Composer `finish(beats=)` + `_slowmo_multi`
+  applies **multiple slow-mo beats** in one pass (verified clip lengthens).
+- **Studio integration** — `studio_pipeline._process` now: shots → track →
+  build_bundle → `plan_edit` (EditPlan) → analytics → per-shot-zoom crop →
+  single-pass graphics+reframe → multi-beat slow-mo + typography. The Director
+  may **drop a clip** it judges a non-highlight (`director.allow_curation`,
+  status `skipped`). New `director.*` config (base_url/use_asr/allow_curation/…).
+
+Default `director.backend: heuristic` keeps the studio fully offline and
+behaviour-identical until a VLM endpoint is configured. Still ○ (GPU + real
+match): the VLM's actual editorial quality, ASR accuracy, and the P2 critic loop.

@@ -213,6 +213,25 @@ def test_single_pass_graphics_reframe(tmp):
     print("  ✓ single-pass graphics+CMC reframe: 1V+1A @9:16, one encode (no mp4v)")
 
 
+def test_multibeat_slowmo(tmp):
+    """Multiple Director slow-mo beats applied in one pass lengthen the clip."""
+    from src.agents.editplan import SlowmoBeat
+    from src.render.composer import Composer
+    clip = tmp / "mb.mp4"
+    _make_clip(clip, w=320, h=240, secs=8, fps=30, with_audio=True)
+    cfg = {"render": {"encoder": "libx264", "fps": 30},
+           "edit": {"effects": {"slowmo_interpolate": False}}}
+    comp = Composer(cfg, {})
+    out = str(tmp / "mb_slow.mp4")
+    comp._slowmo_multi(str(clip), out,
+                       [SlowmoBeat(2.0, 3.0, 0.5), SlowmoBeat(5.0, 6.0, 0.5)])
+    v, a = _probe_streams(out)
+    assert len(v) == 1 and len(a) == 1
+    dur = ff.duration(out)
+    assert dur > 8.5, f"two 1s@0.5x beats should add ~2s, got {dur:.2f}"
+    print(f"  ✓ multi-beat slow-mo: 2 beats applied in one pass (dur {dur:.1f}s)")
+
+
 # --------------------------------------------------------------------------- #
 def main() -> int:
     ff.ensure_tools()
@@ -225,6 +244,7 @@ def main() -> int:
         test_caption_safe_zone()
         test_slowmo_interpolation_adds_frames(tmp)
         test_single_pass_graphics_reframe(tmp)
+        test_multibeat_slowmo(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("\nALL POLISH TESTS PASSED ✅")
