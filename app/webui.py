@@ -188,6 +188,14 @@ def job_status(match_name: str):
             _caption_for(first) if first else "", _all_outputs(match_name))
 
 
+def auto_poll(enabled: bool, match_name: str):
+    """Timer-driven status poll. No-op (returns gr.update()) unless the 'auto'
+    box is on AND a job match is set — so it never clobbers the v1 live log."""
+    if not enabled or not match_name:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    return job_status(match_name)
+
+
 # --------------------------------------------------------------------------- #
 # create / render
 # --------------------------------------------------------------------------- #
@@ -457,7 +465,10 @@ def build() -> gr.Blocks:
                         info="Заполняется при запуске. Жмите «Статус / "
                              "результаты», чтобы видеть прогресс и забрать "
                              "ролики — даже если закрывали вкладку.")
-                    status_btn = gr.Button("↻ Статус / результаты")
+                    with gr.Row():
+                        status_btn = gr.Button("↻ Статус / результаты")
+                        auto = gr.Checkbox(False, label="Авто (каждые 5с)")
+                    timer = gr.Timer(5.0)
 
             run_btn.click(
                 render_job,
@@ -469,6 +480,12 @@ def build() -> gr.Blocks:
             )
             status_btn.click(
                 job_status, inputs=status_match,
+                outputs=[logbox, clip_dd, preview, caption, files])
+            # opt-in auto-refresh: the timer ticks always, but only polls when the
+            # 'auto' box is checked AND a job match is set (no effect otherwise, so
+            # it never clobbers the v1 live-streaming log).
+            timer.tick(
+                auto_poll, inputs=[auto, status_match],
                 outputs=[logbox, clip_dd, preview, caption, files])
             refresh_inputs.click(lambda: gr.update(choices=_input_files()),
                                  outputs=server_pick)
