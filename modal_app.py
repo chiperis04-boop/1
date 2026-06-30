@@ -191,7 +191,7 @@ def setup_models():
 #     render concurrency is separately gated by Gradio's .queue()).
 # --------------------------------------------------------------------------- #
 @app.function(image=image, gpu=GPU, volumes=VOLUMES, secrets=VLM_SECRET,
-              timeout=2 * 60 * 60, scaledown_window=300)
+              timeout=2 * 60 * 60, scaledown_window=300, max_containers=1)
 @modal.concurrent(max_inputs=20)
 @modal.asgi_app()
 def web():
