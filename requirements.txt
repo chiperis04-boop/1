@@ -1,5 +1,12 @@
 # ---- core ----
-numpy>=1.24
+# numpy is capped <2.0 on purpose: the CV/audio stack pinned below for the
+# gradio-4.44.1 era (librosa->numba, opencv-python 4.9, ultralytics 8.2,
+# ctranslate2/faster-whisper, the CUDA torch baked by modal_app.py) was built
+# against the numpy-1.x ABI. Leaving numpy unpinned lets pip pull numpy 2.x,
+# which drags in (or fails to find) a numba/opencv build that matches — a
+# resolver/runtime risk on a cold Modal image. 1.26.x is the safe, reproducible
+# floor-to-ceiling for the whole tree (UI verified GET / = 200 on 1.26.4).
+numpy>=1.24,<2.0
 pyyaml>=6.0
 typer>=0.12
 rich>=13.7
