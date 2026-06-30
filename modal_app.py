@@ -91,7 +91,11 @@ vllm_image = (
     .pip_install("vllm>=0.6.3", "qwen-vl-utils", "huggingface_hub>=0.24,<1.0")
     .env({"HF_HOME": f"{REMOTE}/models/cache/hf",
           "HF_HUB_CACHE": f"{REMOTE}/models/cache/hf/hub",
-          "VLLM_DO_NOT_TRACK": "1"})
+          "VLLM_DO_NOT_TRACK": "1",
+          # debian_slim has no CUDA toolkit (nvcc), so FlashInfer can't JIT-build
+          # its sampling kernel at startup. Use vLLM's native torch sampler
+          # instead (no compilation needed) — fixes "Could not find nvcc".
+          "VLLM_USE_FLASHINFER_SAMPLER": "0"})
 )
 
 
