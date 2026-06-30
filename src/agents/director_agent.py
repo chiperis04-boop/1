@@ -90,6 +90,11 @@ def _context(bundle, window) -> str:
     tx = bundle.transcript_text() if hasattr(bundle, "transcript_text") else ""
     if tx:
         bits.append(f"Commentary: \"{tx[:400]}\".")
+    events = getattr(bundle, "audio_events", []) or []
+    roars = [e for e in events if e.get("label") == "roar"]
+    if roars:
+        bits.append("Crowd roar at " + ", ".join(f"{e['t']:.0f}s" for e in roars[:3])
+                    + " (likely the decisive beat).")
     bits.append("Return the editing plan JSON.")
     return " ".join(bits)
 

@@ -103,15 +103,16 @@ class Cameraman:
         return self._track_ultralytics(clip_path)
 
     def build_plan(self, frames, meta, hero_id: int | None = None,
-                   shots=None, shot_edits=None) -> CropPlan:
+                   shots=None, shot_edits=None, hero_ids=None) -> CropPlan:
         """Plan the smoothed 9:16 crop around an explicit hero track id.
 
-        `shots` (perception.Shot list) makes the crop reset at every broadcast
-        cut. `shot_edits` (agents.ShotEdit list, one per shot) sets a per-shot
-        zoom/framing so the Director can punch in on close-ups or stay wide on
-        tactical shots."""
+        `shots` makes the crop reset at every broadcast cut. `shot_edits` sets a
+        per-shot zoom/framing. `hero_ids` (per-frame hero track id, from
+        cross-shot Re-ID) lets the camera follow the SAME player across cuts even
+        when the tracker re-numbers him."""
         return self._plan_from_frames(frames, meta, hero_hint=hero_id,
-                                      shots=shots, shot_edits=shot_edits)
+                                      shots=shots, shot_edits=shot_edits,
+                                      hero_ids=hero_ids)
 
     # --- Ultralytics BoT-SORT with GMC (default) -------------------------- #
     def _track_ultralytics(self, clip_path: str):
@@ -232,7 +233,7 @@ class Cameraman:
 
     # ------------------------------------------------------------- planning
     def _plan_from_frames(self, frames, meta, hero_hint: int | None = None,
-                          shots=None, shot_edits=None):
+                          shots=None, shot_edits=None, hero_ids=None):
         w, h, fps = meta["w"], meta["h"], meta["fps"]
         aspect = self.cfg.get("edit", {}).get("reframe", {}).get("target_aspect", "9:16")
         aw, ah = (int(x) for x in aspect.split(":"))
@@ -240,7 +241,9 @@ class Cameraman:
         crop_w = min(w, int(round(crop_h * aw / ah)))
 
         hero_id = hero_hint if hero_hint is not None else _pick_hero(frames)
-        focus = _focus_points(frames, hero_id, w, h)
+        # follow a per-frame hero (cross-shot Re-ID) when supplied
+        focus = _focus_points(frames, hero_ids if hero_ids is not None else hero_id,
+                              w, h)
         n = len(frames)
 
         # per-shot smoothing segments (reset the camera at every cut)
@@ -406,11 +409,17 @@ def _pick_hero(frames: list[FrameTrack]) -> int | None:
 
 def _focus_points(frames, hero_id, w, h) -> np.ndarray:
     """Per-frame focus = weighted centre of mass of (hero, ball). Falls back to
-    ball, then all-players centroid, then last-known / frame centre."""
+    ball, then all-players centroid, then last-known / frame centre.
+
+    `hero_id` may be a single track id or a per-frame list/array of ids
+    (cross-shot Re-ID), so the camera can follow the same player across cuts."""
+    per_frame = isinstance(hero_id, (list, tuple, np.ndarray))
     pts = []
     last = np.array([w / 2.0, h / 2.0])
-    for ft in frames:
-        hero = next((p for p in ft.players if p["id"] == hero_id), None)
+    for i, ft in enumerate(frames):
+        hid = (hero_id[i] if per_frame and i < len(hero_id) else
+               (hero_id[-1] if per_frame and hero_id else hero_id))
+        hero = next((p for p in ft.players if p["id"] == hid), None)
         ball = ft.ball
         if hero and ball:
             p = 0.5 * np.array(hero["center"]) + 0.5 * np.array(ball["center"])

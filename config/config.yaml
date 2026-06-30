@@ -200,6 +200,8 @@ edit:
     duck_under_commentary: true # sidechain-duck music when the commentator speaks
     loudnorm: true              # EBU R128 normalize the final mix
     loudness_target_lufs: -14   # social-platform target (TikTok/Reels/Shorts)
+    beat_sync: false            # snap slow-mo onset / cut-in to the music beat
+    beat_snap_max_shift: 0.12   # max seconds a timestamp may be nudged onto a beat
   captions:
     enabled: true
     style: tiktok               # tiktok | clean | broadcast
@@ -290,3 +292,19 @@ qa:
   loudness_tolerance: 3.0        # LUFS tolerance around the target
   zoom_relax: 0.8                # factor to relax per-shot zoom on crop-jump
   # min_seconds / max_seconds: optional duration window (unset => no duration gate)
+
+
+# ---- audio-event perception (v3): crowd-roar / spike cue for Scout+Director ----
+audio_events:
+  enabled: true
+  sample_rate: 16000
+  hop_seconds: 0.5
+  roar_z: 3.0                   # robust z-score for a sustained crowd roar
+  spike_z: 5.0                  # short loud transient (whistle/impact)
+  roar_min_seconds: 1.0
+
+# ---- cross-shot hero Re-ID (v3): follow the same player through cuts ----
+reid:
+  enabled: true
+  backend: histogram            # histogram | osnet (osnet needs torchreid)
+  min_sim: 0.5                  # min appearance similarity to link a track

@@ -346,3 +346,38 @@ The "watch the output and fix it" loop is implemented and wired:
 Still ○ (GPU + real match): the Critic's actual visual judgement and the
 end-to-end multi-revision quality on real footage. P3 (action spotting,
 cross-shot Re-ID, music beat-sync) remains.
+
+
+---
+
+## Appendix — P3 status (smarter perception; deterministic backends CPU-verified)
+
+P3 upgrades perception with lightweight, dependency-free backends (numpy +
+ffmpeg) that are CPU-unit-tested; the heavy models (PANNs / OSNet / librosa)
+are optional drop-in upgrades guarded behind the same interfaces.
+
+- **Audio-event cue** — `src/perception/audio_events.py` `analyze_audio()`
+  decodes the audio (ffmpeg PCM) and builds a 0..1 excitement curve + `roar` /
+  `spike` events via a robust-z RMS detector (optional PANNs hook). Wired into
+  the `PerceptionBundle` (`audio_curve`/`audio_events`) and surfaced in the
+  Director's prompt ("crowd roar at Ns — likely the decisive beat").
+  `tests/test_audio_events.py` (roar burst detected; quiet clip clean).
+- **Cross-shot hero Re-ID** — `src/vision/reid.py`: torso colour-histogram
+  embeddings (optional OSNet), `cross_shot_hero_map()` links the hero's track id
+  across cuts even when BoT-SORT renumbers him, and `per_frame_hero()` feeds the
+  Cameraman a per-frame hero id (new `build_plan(hero_ids=)` /
+  `_focus_points` per-frame support) so the camera follows the SAME player
+  through shots. `tests/test_reid.py` (embedding separation, linking, per-frame
+  follow).
+- **Music beat-sync** — `src/edit/music.py` `detect_beats()` (numpy onset-peak
+  detector, optional librosa) + `snap_to_beats()` + `beat_align_plan()` snap the
+  slow-mo onset / cut-in onto the musical beat. `tests/test_music.py` (recovers
+  ~120 BPM from a click track; snapping; plan alignment).
+- **Studio integration** — `_process` now: optional beat-sync of the plan,
+  cross-shot Re-ID -> per-frame hero ids into the crop, and the audio-event
+  context for the Director. New config: `audio_events.*`, `reid.*`,
+  `edit.audio.beat_sync`. All gated; defaults keep behaviour offline-safe.
+
+Still ○ (GPU + real match): PANNs/OSNet quality vs the deterministic baselines,
+and end-to-end behaviour on real footage. With P0–P3 the studio is now an
+agentic, frame-aware, self-reviewing pipeline rather than fixed presets.

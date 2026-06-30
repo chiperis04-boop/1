@@ -76,6 +76,15 @@ def build_bundle(clip_path: str, cfg: dict | None = None, shots=None,
 
     if d.get("use_asr", False):
         bundle.transcript = _transcribe(clip_path, cfg)
+
+    if cfg.get("audio_events", {}).get("enabled", True):
+        try:
+            from .audio_events import analyze_audio
+            aa = analyze_audio(clip_path, cfg)
+            bundle.audio_curve = aa.curve
+            bundle.audio_events = [e.to_dict() for e in aa.events]
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[perception] audio-event analysis failed: {exc}")
     return bundle
 
 

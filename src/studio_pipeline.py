@@ -207,6 +207,16 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
             log.info(f"[studio] clip {i} dropped by Director (not a highlight)")
             return
 
+        # P3: snap the plan's slow-mo onset / cut-in to the music beat
+        if cfg.get("edit", {}).get("audio", {}).get("beat_sync", False):
+            mtrack = _first_music(cfg)
+            if mtrack:
+                try:
+                    from .edit.music import beat_align_plan
+                    plan, _ = beat_align_plan(plan, mtrack, cfg)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(f"[studio] beat-sync skipped: {exc}")
+
         stage = "homography"                # optional grass-anchor + metric calib
         homography = compute_homography(clip, cfg) if _graphics_on(cfg) else None
         calib = getattr(homography, "calibration", None) if homography else None
@@ -219,6 +229,21 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         sc.hero_source = analytics.hero_source
         sc.possession_pct = analytics.possession_share_pct()
 
+        stage = "reid"                      # cross-shot hero Re-ID (follow across cuts)
+        hero_ids = None
+        if cfg.get("reid", {}).get("enabled", True) and shots and len(shots) > 1 \
+                and analytics.hero_id is not None:
+            try:
+                from .vision.reid import (build_shot_track_embeddings,
+                                          cross_shot_hero_map, per_frame_hero)
+                embs = build_shot_track_embeddings(clip, frames, shots, cfg)
+                hsh = _hero_shot(frames, shots, analytics.hero_id)
+                hmap = cross_shot_hero_map(analytics.hero_id, embs, hsh,
+                                           float(cfg.get("reid", {}).get("min_sim", 0.5)))
+                hero_ids = per_frame_hero(len(frames), shots, hmap, analytics.hero_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[studio] reid skipped: {exc}")
+
         stage = "render+review"             # render plan -> QA (+critic) -> revise
         stats = _stats_from(analytics)
         tele_on = cfg.get("telestration", {}).get("enabled", True)
@@ -228,7 +253,7 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
             counter["n"] += 1
             k = counter["n"]
             cplan = cam.build_plan(frames, meta, hero_id=analytics.hero_id,
-                                   shots=shots, shot_edits=p.shots)
+                                   shots=shots, shot_edits=p.shots, hero_ids=hero_ids)
             world = screen = None
             if tele_on:
                 world, screen = composer.make_annotators(cplan, p.to_manifest(),
@@ -322,6 +347,30 @@ def _write_caption(path: str, w: EventWindow, manifest, brand: dict):
 def _graphics_on(cfg: dict) -> bool:
     return bool(cfg.get("vision", {}).get("pitch", {}).get("enabled", False)
                 or cfg.get("graphics", {}).get("enabled", False))
+
+
+def _first_music(cfg: dict) -> str | None:
+    """Peek the first music track (for beat-sync) without advancing anything."""
+    from pathlib import Path as _P
+    d = _P(cfg.get("edit", {}).get("audio", {}).get("music_dir", "assets/music"))
+    if not d.exists():
+        return None
+    tracks = sorted(str(p) for p in d.glob("*")
+                    if p.suffix.lower() in {".mp3", ".wav", ".m4a", ".aac"})
+    return tracks[0] if tracks else None
+
+
+def _hero_shot(frames, shots, hero_id):
+    """Index of the shot where the hero track id appears most (for Re-ID ref)."""
+    from .perception.shots import frame_segments
+    segs = frame_segments(shots, len(frames))
+    best_shot, best_count = None, -1
+    for si, (a, b) in enumerate(segs):
+        c = sum(1 for fi in range(a, min(b, len(frames)))
+                if any(p["id"] == hero_id for p in getattr(frames[fi], "players", [])))
+        if c > best_count:
+            best_shot, best_count = si, c
+    return best_shot
 
 
 def _deep_merge(base: dict, over: dict):
