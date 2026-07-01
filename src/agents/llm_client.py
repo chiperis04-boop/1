@@ -49,6 +49,12 @@ class VisionLLMClient:
         self.max_retries = int(d.get("max_retries", 2))
         self.timeout = float(d.get("timeout", 60.0))
         self.system_prompt = d.get("system_prompt", "")
+        # hosted NIM VLMs accept only ONE image/request -> tile the sampled
+        # keyframes into a single contact-sheet so the model still sees the whole
+        # sequence (motion / ball path / footwork). Disable for a true multi-image
+        # endpoint (local vLLM) via llm.tile_frames=false.
+        self.tile_frames = bool(llm.get("tile_frames", True))
+        self.max_sampled_frames = int(llm.get("max_sampled_frames", 24))
 
     # ------------------------------------------------------------------ public
     def is_configured(self) -> bool:
@@ -86,6 +92,9 @@ class VisionLLMClient:
 
     def _complete_openai(self, system: str, text: str, images: list[bytes]) -> str:
         from openai import OpenAI
+        if self.tile_frames and len(images) > 1:
+            from ..utils.io import montage_jpeg
+            images = montage_jpeg(images, max_frames=self.max_sampled_frames)
         client = OpenAI(base_url=self.base_url,
                         api_key=self.api_key or "not-needed-local",
                         timeout=self.timeout)

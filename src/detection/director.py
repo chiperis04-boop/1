@@ -33,7 +33,7 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..utils.io import downscale_max, get_logger
+from ..utils.io import downscale_max, get_logger, montage_jpeg
 
 log = get_logger()
 
@@ -179,6 +179,9 @@ def _call_openai(frames: list[bytes], ctx: str, d: dict, llm: dict | None = None
                or (llm.get("api_key") or "").strip()
                or os.environ.get("OPENAI_API_KEY") or "not-needed-for-local")
     model = llm.get("model_name") or d.get("model", "minicpm-v")
+    # hosted NIM VLMs accept 1 image/request -> tile keyframes into a contact-sheet
+    if llm.get("tile_frames", True) and len(frames) > 1:
+        frames = montage_jpeg(frames, max_frames=int(llm.get("max_sampled_frames", 24)))
     client = OpenAI(base_url=base_url, api_key=api_key)
     content = [{"type": "text", "text": ctx}]
     for fb in frames:

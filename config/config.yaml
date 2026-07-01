@@ -414,7 +414,15 @@ llm:
   base_url: "https://integrate.api.nvidia.com/v1"
   # local NIM docker alternative (self-hosted container):
   # base_url: "http://localhost:8000/v1"
-  model_name: "nvidia/cosmos3-nano-reasoner"
+  model_name: "meta/llama-4-maverick-17b-128e-instruct"   # best accessible VLM
+                                           # (verified live): natively multimodal,
+                                           # clean JSON, multi-image. 'cosmos3-nano-
+                                           # reasoner' is self-host-only; cosmos-reason2
+                                           # /vila/gemma-3/phi-vision 404 for this account.
+                                           # alt accessible: meta/llama-3.2-90b-vision-instruct
+  tile_frames: true                        # pack keyframes into ONE contact-sheet so
+                                           # the VLM sees the whole 24-frame sequence
+                                           # (also sidesteps per-request image caps)
   max_sampled_frames: 24         # keyframes/clip fed to the VLM (24 over ~30s)
   # SECURITY: the real key is read from the NVIDIA_API_KEY env var FIRST; this
   # config value is a fallback. Do NOT commit a live nvapi- key to a public repo

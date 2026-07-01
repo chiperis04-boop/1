@@ -194,3 +194,54 @@ def downscale_max(frame, max_side: int = 768):
                           interpolation=cv2.INTER_AREA)
     except Exception:  # noqa: BLE001
         return frame
+
+
+
+def montage_jpeg(frames, max_frames: int = 24, cell: int = 256,
+                 max_canvas: int = 1024, quality: int = 72):
+    """Tile JPEG-encoded keyframes into ONE contact-sheet JPEG.
+
+    Hosted VLM endpoints (e.g. NVIDIA NIM llama-3.2-vision) accept only ONE image
+    per request. Packing up to `max_frames` keyframes into a single grid image
+    gives the reasoning VLM the temporal context (motion / ball trajectory /
+    footwork) within that limit. The sheet is kept small (<=max_canvas px, JPEG
+    q<=72) so it stays under NIM's 180KB inline-image cap. Returns a 1-element
+    list of JPEG bytes; passes through unchanged for 0/1 frame or on any failure.
+    """
+    try:
+        import math
+
+        import cv2
+        import numpy as np
+        if not frames or len(frames) <= 1:
+            return frames
+        frames = frames[:max_frames]
+        imgs = []
+        for fb in frames:
+            arr = cv2.imdecode(np.frombuffer(fb, np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                continue
+            h, w = arr.shape[:2]
+            s = cell / float(max(h, w))
+            imgs.append(cv2.resize(arr, (max(1, int(w * s)), max(1, int(h * s))),
+                                   interpolation=cv2.INTER_AREA))
+        if not imgs:
+            return frames
+        cols = int(math.ceil(math.sqrt(len(imgs))))
+        rows = int(math.ceil(len(imgs) / cols))
+        ch = max(i.shape[0] for i in imgs)
+        cw = max(i.shape[1] for i in imgs)
+        canvas = np.zeros((rows * ch, cols * cw, 3), dtype=np.uint8)
+        for i, im in enumerate(imgs):
+            y, x = (i // cols) * ch, (i % cols) * cw
+            canvas[y:y + im.shape[0], x:x + im.shape[1]] = im
+        m = max(canvas.shape[:2])
+        if m > max_canvas:
+            s = max_canvas / float(m)
+            canvas = cv2.resize(canvas, (int(canvas.shape[1] * s),
+                                         int(canvas.shape[0] * s)),
+                                interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return [buf.tobytes()] if ok else frames
+    except Exception:  # noqa: BLE001
+        return frames
