@@ -3,8 +3,8 @@
 # ============================================================
 
 channel:
-  name: "YOUR CHANNEL"
-  handle: "@yourchannel"
+  name: "GOSHO TALENT"
+  handle: "@goshotalent"
   primary_color: [0, 220, 255]     # BGR — used for arrows, lower-thirds
   secondary_color: [20, 20, 20]
   font: assets/fonts/Inter-Bold.ttf
@@ -13,7 +13,7 @@ intro:
   enabled: true
   clip: assets/branding/intro.mp4   # short 0.8-1.5s sting (you provide)
   # if no clip, a generated animated logo card is used
-  fallback_text: "YOUR CHANNEL"
+  fallback_text: "@goshotalent"
 
 outro:
   enabled: true
@@ -48,7 +48,7 @@ stats_overlay:
 
 watermark:
   enabled: true
-  text: "@yourchannel"
+  text: "@goshotalent"
   position: top_right
   opacity: 0.6
 
