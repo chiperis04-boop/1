@@ -311,6 +311,13 @@ class Cameraman:
             ch_arr = np.clip(ch_arr, min_ch, float(h))
             cw_arr = np.minimum(float(w), ch_arr * aw / ah)
         cx = np.clip(cx, cw_arr / 2.0, w - cw_arr / 2.0)
+        # Prefer cropping the TOP of the broadcast frame (score-bug / stands)
+        # over the bottom pitch: nudge the crop centre down into whatever zoom
+        # headroom exists (no effect at full-height crop). Keeps the live
+        # scoreboard out of frame when we're zoomed in enough to have a choice.
+        vbias = float(rf.get("vertical_bias", 0.0))
+        if vbias:
+            cy = cy + vbias * (float(h) - ch_arr) / 2.0
         cy = np.clip(cy, ch_arr / 2.0, h - ch_arr / 2.0)
 
         boxes = [(int(round(x - cw / 2.0)), int(round(y - ch / 2.0)))

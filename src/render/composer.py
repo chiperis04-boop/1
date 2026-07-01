@@ -318,7 +318,20 @@ class Composer:
         if run is None:
             return
         num = analytics.jerseys.number_of.get(run.track_id)
-        label = "POSSESSION" + (f"  #{num}" if num is not None else "")
+        # data-backed label: the possessing team's share (+ player # when known).
+        # A bare "POSSESSION" reads as broken, so require a real value to show.
+        team = (analytics.teams.team_of.get(run.track_id)
+                if getattr(analytics.teams, "team_of", None) else None)
+        share = analytics.possession_share_pct()
+        pct = share.get(team) if team is not None else None
+        parts = ["POSSESSION"]
+        if pct is not None:
+            parts.append(f"{pct}%")
+        if num is not None:
+            parts.append(f"#{num}")
+        if len(parts) == 1:          # no %/# to show -> skip the empty plate
+            return
+        label = "  ".join(parts)
         col = analytics.color_for_track(run.track_id, (0, 220, 255))
         h, w = frame.shape[:2]
         scale = 0.6

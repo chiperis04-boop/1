@@ -275,6 +275,10 @@ edit:
     # after Kalman smoothing. Fractions of frame size PER SECOND.
     max_pan_frac_per_s: 0.6     # max horizontal/vertical crop-centre speed
     max_zoom_rate_per_s: 0.5    # max crop-size change rate (fraction/s)
+    # Prefer trimming the TOP of the broadcast frame (live score-bug / stands)
+    # over the bottom pitch when the crop is zoomed in enough to have headroom.
+    # 0 = centred (no bias); 0.5 = use half the headroom to drop the top band.
+    vertical_bias: 0.5
     # ANTI-BLUR: hard ceiling on how much the 9:16 slice may be up-scaled to the
     # output. A 1080p 9:16 slice already up-scales ~1.8x to 1080x1920, so 1.9
     # keeps a sharp near-full-height follow (no pixelated punch-in); a 4K source
