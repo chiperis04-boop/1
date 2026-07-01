@@ -294,10 +294,21 @@ class Cameraman:
         zr = float(rf.get("max_zoom_rate_per_s", 0.5))
         cw_arr = _limit_rate(cw_arr, zr * w, fps, segments)
         ch_arr = _limit_rate(ch_arr, zr * h, fps, segments)
+        # ANTI-BLUR: never crop so tight that upscaling the slice to the output
+        # exceeds max_upscale. A 9:16 slice of 1080p already upscales ~1.8x to
+        # 1080x1920; any extra punch-in on top pixelates (the blurry crowd/wide
+        # frames). This floors the crop size from the output resolution, so on
+        # 1080p it stays a sharp near-full-height follow, while a 4K source can
+        # still punch in. Ratio is preserved (crop stays 9:16).
+        prof = self.cfg.get("_active_profile", {"width": 1080, "height": 1920})
+        max_up = float(rf.get("max_upscale", 1.9))
+        if max_up > 0:
+            min_ch = min(float(h), prof["height"] / max_up)
+            ch_arr = np.clip(ch_arr, min_ch, float(h))
+            cw_arr = np.minimum(float(w), ch_arr * aw / ah)
         cx = np.clip(cx, cw_arr / 2.0, w - cw_arr / 2.0)
         cy = np.clip(cy, ch_arr / 2.0, h - ch_arr / 2.0)
 
-        prof = self.cfg.get("_active_profile", {"width": 1080, "height": 1920})
         boxes = [(int(round(x - cw / 2.0)), int(round(y - ch / 2.0)))
                  for x, y, cw, ch in zip(cx, cy, cw_arr, ch_arr)]
         sizes = [(int(round(cw)), int(round(ch))) for cw, ch in zip(cw_arr, ch_arr)]

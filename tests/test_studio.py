@@ -319,7 +319,8 @@ def test_per_shot_zoom_sizes():
     from src.agents.editplan import ShotEdit
     from src.perception.shots import Shot
     from src.tracking.cameraman import Cameraman, FrameTrack
-    cfg = {"edit": {"reframe": {"target_aspect": "9:16"}}, "tracking": {},
+    cfg = {"edit": {"reframe": {"target_aspect": "9:16", "max_upscale": 100}},
+           "tracking": {},
            "_active_profile": {"width": 1080, "height": 1920}}
     cam = Cameraman(cfg)
     n = 60
@@ -335,6 +336,31 @@ def test_per_shot_zoom_sizes():
     tight_cw = plan.sizes[45][0]
     assert tight_cw < base_cw and abs(tight_cw - base_cw / 2) <= 2, (base_cw, tight_cw)
     print(f"  ✓ per-shot zoom: crop {base_cw}px -> {tight_cw}px on the punch-in shot")
+
+
+def test_anti_blur_upscale_clamp():
+    """The crop must never be so tight that it up-scales past max_upscale — on a
+    hi-res source an aggressive punch-in is floored so the output stays sharp."""
+    from src.agents.editplan import ShotEdit
+    from src.perception.shots import Shot
+    from src.tracking.cameraman import Cameraman, FrameTrack
+    cfg = {"edit": {"reframe": {"target_aspect": "9:16"}}, "tracking": {},
+           "_active_profile": {"width": 1080, "height": 1920}}   # default max_upscale 1.9
+    cam = Cameraman(cfg)
+    n = 30
+    frames = [FrameTrack(idx=i, players=[{"id": 1, "cls": 0,
+                                          "xyxy": [1900, 1000, 1980, 1200],
+                                          "center": [1940, 1100]}])
+              for i in range(n)]
+    meta = {"w": 3840, "h": 2160, "fps": 30.0}                   # 4K source
+    shots = [Shot(0, 0, 1, 0, n)]
+    edits = [ShotEdit(0, zoom=2.5)]                              # very aggressive
+    plan = cam.build_plan(frames, meta, hero_id=1, shots=shots, shot_edits=edits)
+    min_ch = min(s[1] for s in plan.sizes)
+    assert min_ch >= (1920 / 1.9) - 1, (min_ch, 1920 / 1.9)
+    assert (1920.0 / min_ch) <= 1.92, 1920.0 / min_ch
+    print(f"  ✓ anti-blur: crop_h floored at {min_ch:.0f}px "
+          f"(<= {1920.0 / min_ch:.2f}x up-scale)")
 
 
 def test_camera_leads_the_ball():
@@ -455,6 +481,7 @@ def main() -> int:
         test_hero_resolution_priority,
         test_hero_halo_persistence,
         test_per_shot_zoom_sizes,
+        test_anti_blur_upscale_clamp,
         test_team_colors,
         test_pick_key_player_restricts_to_attacking_team,
         test_scout_dedupe_merges_cluster,
