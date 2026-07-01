@@ -67,6 +67,7 @@ class StudioClip:
     replays: int = 0
     qa_score: float | None = None
     qa_issues: list | None = None
+    guardrail_issues: list | None = None
     revisions: int = 0
     stage_failed: str | None = None
     error: str | None = None
@@ -229,6 +230,15 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         sc.hero_number = analytics.hero_number
         sc.hero_source = analytics.hero_source
         sc.possession_pct = analytics.possession_share_pct()
+
+        stage = "guardrail"                 # fact-check overlays vs the data
+        if cfg.get("qa", {}).get("use_guardrail", True):
+            from .qa.guardrail import facts_from, guardrail_plan
+            plan, greport = guardrail_plan(plan, facts_from(w, analytics), cfg)
+            if greport.changed:
+                manifest = plan.to_manifest()    # re-derive so render/caption use clean text
+                sc.manifest = plan.to_dict()
+                sc.guardrail_issues = greport.issues
 
         stage = "reid"                      # cross-shot hero Re-ID (follow across cuts)
         hero_ids = None
