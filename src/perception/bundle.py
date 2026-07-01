@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..utils.io import get_logger
+from ..utils.io import downscale_max, get_logger
 from .shots import Shot, segment_shots
 
 log = get_logger()
@@ -148,6 +148,7 @@ def _grab_jpegs(clip_path: str, times: list[float]) -> list[bytes]:
         ok, frame = cap.read()
         if not ok:
             continue
+        frame = downscale_max(frame, 768)       # cap VLM image tokens (ctx limit)
         ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok2:
             out.append(buf.tobytes())

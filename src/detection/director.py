@@ -33,7 +33,7 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..utils.io import get_logger
+from ..utils.io import downscale_max, get_logger
 
 log = get_logger()
 
@@ -288,6 +288,7 @@ def _sample_frames(clip_path: str, fps: float, max_frames: int) -> list[bytes]:
         if not ok:
             break
         if idx % step == 0:
+            frame = downscale_max(frame, 768)   # cap VLM image tokens (ctx limit)
             ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok2:
                 frames.append(buf.tobytes())

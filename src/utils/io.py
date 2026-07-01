@@ -173,3 +173,24 @@ def ensure_dir(path: str | Path) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+
+def downscale_max(frame, max_side: int = 768):
+    """Downscale a BGR frame so its longest side is <= max_side (keep aspect).
+
+    Vision-LLM image-token count scales with resolution; sending full-res 1080p
+    keyframes blows past the model context (vLLM 400: 'prompt ... plus multimodal
+    tokens'). 768px keeps enough detail for the Director/Critic at a fraction of
+    the tokens. No-op if already small enough."""
+    try:
+        import cv2
+        h, w = frame.shape[:2]
+        m = max(h, w)
+        if m <= max_side:
+            return frame
+        s = max_side / float(m)
+        return cv2.resize(frame, (max(1, int(w * s)), max(1, int(h * s))),
+                          interpolation=cv2.INTER_AREA)
+    except Exception:  # noqa: BLE001
+        return frame
