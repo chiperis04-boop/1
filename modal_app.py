@@ -204,8 +204,10 @@ def vlm():
     ]
     # Only pass AWQ when serving an AWQ checkpoint; the 7B/32B non-AWQ fallbacks
     # (and any fp16 model) must NOT get --quantization awq or vLLM errors out.
+    # AWQ also REQUIRES float16 (the model config defaults to bf16, which vLLM
+    # rejects: 'torch.bfloat16 is not supported for quantization method awq').
     if "awq" in model.lower():
-        cmd[5:5] = ["--quantization", "awq"]
+        cmd[5:5] = ["--quantization", "awq", "--dtype", "float16"]
     print("launching:", " ".join(cmd))
     subprocess.Popen(cmd)
 
