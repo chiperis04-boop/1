@@ -47,14 +47,44 @@ _KIND_KEYWORDS = {
     "shot": "chance", "chance": "chance", "miss": "chance", "post": "chance",
     "bar": "chance", "header": "chance", "free kick": "chance", "offside": "chance",
     "skill": "skill", "dribble": "skill", "nutmeg": "skill", "take-on": "skill",
+    "take on": "skill", "megs": "skill", "solo run": "skill", "mazy": "skill",
+    "stepover": "skill", "step over": "skill", "roulette": "skill", "rainbow": "skill",
     "red card": "card", "yellow card": "card", "card": "card", "sent off": "card",
     "var": "card", "penalty": "card",
 }
+# words that signal a HIGH-ENERGY highlight -> longer, more generous clip window
+_ENERGY_WORDS = (
+    "incredible", "outrageous", "insane", "unbelievable", "world class",
+    "world-class", "ridiculous", "magic", "magical", "stunning", "sensational",
+    "wonder", "screamer", "brilliant", "genius", "hacker", "filthy", "nasty",
+    "unreal", "audacious", "sublime", "mesmerising", "mesmerizing", "electric",
+)
+# skill-move cues (dribbling energy) — used to size the window and pick slow-mo
+_SKILL_WORDS = (
+    "dribble", "nutmeg", "megs", "solo run", "take-on", "take on", "stepover",
+    "step over", "roulette", "rainbow", "mazy", "skill", "pace", "burst",
+    "beats his", "past two", "past three", "waltz",
+)
 # events we never clip on their own (noise)
 _SKIP_KINDS = {"sub", "substitution", "kick-off", "kickoff", "half-time",
                "full-time", "corner", "throw-in", "goal kick"}
 
 _PERIOD_START_MIN = {1: 0, 2: 45, 3: 90, 4: 105}   # ET1 starts at 90', ET2 at 105'
+
+
+def _skill_energy(text: str) -> float:
+    """Score 0..1 of how HIGH-ENERGY a description reads, from intensity words,
+    skill-move cues and exclamation. Drives dynamic clip-boundary sizing so a
+    'outrageous solo run 🔥' gets a longer, more generous window than a routine
+    tap-in."""
+    if not text:
+        return 0.0
+    t = str(text).lower()
+    n_intensity = sum(1 for w in _ENERGY_WORDS if w in t)
+    has_skill = any(w in t for w in _SKILL_WORDS)
+    excl = min(3, t.count("!") + t.count("🔥"))
+    energy = 0.28 * n_intensity + 0.24 * (1 if has_skill else 0) + 0.12 * excl
+    return round(min(1.0, energy), 3)
 
 
 @dataclass
@@ -67,11 +97,14 @@ class MatchEvent:
     player: str | None = None
     number: int | None = None
     importance: float | None = None    # None -> derived from kind (xT-style)
+    energy: float = 0.0                 # 0..1 description energy (drives window size)
     text: str = ""
 
     def __post_init__(self):
         if self.importance is None:
             self.importance = _default_importance(self.kind)
+        if not self.energy and self.text:
+            self.energy = _skill_energy(self.text)
 
     def match_seconds(self) -> float:
         """Seconds since this period's nominal start (e.g. 2nd-half 67' -> 22*60)."""
@@ -335,6 +368,13 @@ def events_to_windows(events: list[MatchEvent], kickoffs: dict, cfg: dict,
             skipped += 1
             continue
         start, end = _window_bounds(ev.kind, anchor, cfg, sc, duration)
+        # dynamic boundaries: a high-energy skill/goal description earns a longer,
+        # more generous window (more buildup + celebration) than a routine event.
+        if ev.energy > 0:
+            start = max(0.0, start - ev.energy * float(ef.get("energy_pre_boost", 4.0)))
+            end = end + ev.energy * float(ef.get("energy_post_boost", 3.0))
+            if duration:
+                end = min(end, duration)
         label = ev.text or f"{ev.minute}' {ev.kind}"
         windows.append(EventWindow(
             kind=ev.kind, anchor_t=anchor, start=start, end=end,
@@ -342,7 +382,7 @@ def events_to_windows(events: list[MatchEvent], kickoffs: dict, cfg: dict,
             verified=(ev.kind == "goal"), minute=ev.minute,
             sources=["event_feed"],
             meta={"team": ev.team, "player": ev.player, "number": ev.number,
-                  "label": label, "period": ev.period}))
+                  "label": label, "period": ev.period, "energy": ev.energy}))
         placed += 1
 
     windows.sort(key=lambda w: w.anchor_t)

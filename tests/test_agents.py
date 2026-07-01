@@ -227,6 +227,39 @@ def test_review_loop_revises_until_pass():
           f"({res.attempts} attempts)")
 
 
+def test_apply_corrections_text_overlap():
+    """A Critic 'text_in_ui' / 'text_unreadable' issue triggers a single-pass
+    revision: force the hook into the safe zone and shrink it."""
+    from src.agents.editplan import EditPlan
+    from src.agents.review import apply_corrections
+
+    class _QA:
+        issues, passed, score = [], False, 0.5
+
+    class _Critic:
+        issues, ok, score, suggestions = ["text_in_ui"], False, 0.5, {}
+
+    p, changed = apply_corrections(EditPlan(hook_text="WHAT A GOAL"),
+                                   _QA(), _Critic(), {})
+    assert changed and p.caption_safe is True and p.hook_scale_mult < 1.0, \
+        (changed, p.caption_safe, p.hook_scale_mult)
+    print(f"  \u2713 apply_corrections: text overlap -> caption_safe + hook "
+          f"x{p.hook_scale_mult} (single-pass revision)")
+
+
+def test_default_hook_skill_is_energetic():
+    """Offline skill hook is punchy and uses the log's player when the
+    description reads high-energy (the VLM writes the richer hook on GPU)."""
+    from types import SimpleNamespace
+
+    from src.detection.director import _default_hook
+    hot = SimpleNamespace(meta={"energy": 0.7, "player": "Yamal"}, score_after=None)
+    assert _default_hook("skill", hot, {}) == "YAMAL IN HACKER MODE"
+    mild = SimpleNamespace(meta={"energy": 0.1}, score_after=None)
+    assert _default_hook("skill", mild, {}) == "OUTRAGEOUS SKILL!"
+    print("  \u2713 default_hook: high-energy skill -> 'YAMAL IN HACKER MODE'")
+
+
 def main() -> int:
     print("agent-layer tests (no GPU/network)")
     for t in (test_editplan_coerce_clamps_and_defaults,
@@ -237,6 +270,8 @@ def main() -> int:
               test_plan_edit_falls_back_on_error_and_when_unconfigured,
               test_critic_coerce_and_no_backend,
               test_apply_corrections_variants,
+              test_apply_corrections_text_overlap,
+              test_default_hook_skill_is_energetic,
               test_review_loop_revises_until_pass):
         t()
     print("\nALL AGENT TESTS PASSED ✅")

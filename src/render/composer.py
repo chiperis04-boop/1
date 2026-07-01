@@ -712,7 +712,7 @@ def _draw_hook(draw, size, text, font, cfg=None):
     cy = y
     for ln, lw in zip(lines, widths):
         x = (W - lw) // 2
-        draw.text((x + 2, cy + 2), ln, font=font, fill=(0, 0, 0, 200))
+        draw.text((x + 1, cy + 1), ln, font=font, fill=(0, 0, 0, 200))   # 1px drop-shadow
         draw.text((x, cy), ln, font=font, fill=(255, 255, 255, 255))
         cy += lh + leading
 
@@ -731,7 +731,7 @@ def _draw_plates(draw, size, plates, font, cfg=None):
         pad = int(th * 0.45)
         draw.rounded_rectangle([x - pad, y - pad, x + tw + pad, y + th + pad],
                                radius=int(pad * 0.8), fill=(0, 0, 0, box_op))
-        draw.text((x + 2, y + 2), label, font=font, fill=(0, 0, 0, 200))
+        draw.text((x + 1, y + 1), label, font=font, fill=(0, 0, 0, 200))   # 1px drop-shadow
         draw.text((x, y), label, font=font, fill=(0, 220, 255, 255))
         y += th + int(th * 1.1)
 

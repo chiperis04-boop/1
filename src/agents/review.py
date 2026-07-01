@@ -127,6 +127,17 @@ def apply_corrections(plan, qa, critic, cfg=None) -> tuple[object, bool]:
             p.slowmo_beats = new_beats
             changed = True
 
+    # overlapping / unreadable text (hook on the scoreboard or too big) -> push
+    # the hook into the safe zone and shrink it, then re-render (single pass).
+    if issues & {"text_in_ui", "text_unreadable"}:
+        if not getattr(p, "caption_safe", False):
+            p.caption_safe = True
+            changed = True
+        new_mult = round(max(0.75, float(getattr(p, "hook_scale_mult", 1.0)) * 0.9), 3)
+        if abs(new_mult - float(getattr(p, "hook_scale_mult", 1.0))) > 1e-6:
+            p.hook_scale_mult = new_mult
+            changed = True
+
     # Critic asked to drop specific shots
     for idx in sug.get("drop_shots", []) or []:
         for s in getattr(p, "shots", []):

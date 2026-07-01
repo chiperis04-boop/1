@@ -262,10 +262,19 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         # broadcast replay inserts are natural reaction cuts.
         reaction = [(s.start, s.end) for s in shots if getattr(s, "is_replay", False)]
         counter = {"n": 0}
+        # capture the base caption look so a text-overlap revision recomputes from
+        # it (no compounding across revisions)
+        _cap0 = cfg.get("edit", {}).get("captions", {})
+        base_hook_scale = float(_cap0.get("hook_scale", 0.030))
+        base_avoid = bool(_cap0.get("avoid_scoreboard", False))
 
         def render_plan(p) -> str:
             counter["n"] += 1
             k = counter["n"]
+            # honour the Critic's caption-safety correction for THIS render
+            cap = composer.cfg.setdefault("edit", {}).setdefault("captions", {})
+            cap["hook_scale"] = base_hook_scale * float(getattr(p, "hook_scale_mult", 1.0) or 1.0)
+            cap["avoid_scoreboard"] = base_avoid or bool(getattr(p, "caption_safe", False))
             cplan = cam.build_plan(frames, meta, hero_id=analytics.hero_id,
                                    shots=shots, shot_edits=p.shots, hero_ids=hero_ids)
             world = screen = None

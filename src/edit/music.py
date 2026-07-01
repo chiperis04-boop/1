@@ -26,6 +26,7 @@ log = get_logger()
 class BeatGrid:
     bpm: float = 0.0
     beats: list[float] = field(default_factory=list)     # beat times (s)
+    strengths: list[float] = field(default_factory=list)  # 0..1 accent per beat
 
     def __bool__(self) -> bool:
         return len(self.beats) >= 2
@@ -38,18 +39,45 @@ def detect_beats(path: str, cfg: dict | None = None) -> BeatGrid:
     if wav.size < sr // 2:
         return BeatGrid()
 
-    # try librosa first (optional, more robust)
+    # try librosa first (optional, more robust) — also grab the onset-strength
+    # envelope so we know which beats are ACCENTED (the bass drops).
     try:
         import librosa
-        tempo, beat_frames = librosa.beat.beat_track(y=wav, sr=sr, units="frames")
+        onset_env = librosa.onset.onset_strength(y=wav, sr=sr)
+        tempo, beat_frames = librosa.beat.beat_track(
+            onset_envelope=onset_env, sr=sr, units="frames")
         beats = librosa.frames_to_time(beat_frames, sr=sr)
         bpm = float(np.atleast_1d(tempo)[0])
         if len(beats) >= 2:
-            return BeatGrid(bpm=bpm, beats=[round(float(t), 3) for t in beats])
+            bf = np.clip(np.asarray(beat_frames), 0, len(onset_env) - 1)
+            strengths = _norm01(onset_env[bf]) if len(onset_env) else []
+            return BeatGrid(bpm=bpm, beats=[round(float(t), 3) for t in beats],
+                            strengths=[round(float(s), 3) for s in strengths])
     except Exception:  # noqa: BLE001
         pass
 
     return _onset_beats(wav, sr)
+
+
+def _norm01(a) -> np.ndarray:
+    a = np.asarray(a, dtype=np.float64)
+    if a.size == 0:
+        return a
+    lo, hi = float(a.min()), float(a.max())
+    return (a - lo) / (hi - lo) if hi > lo else np.ones_like(a)
+
+
+def strong_beats(grid: "BeatGrid", frac: float = 0.5) -> list[float]:
+    """Return the ACCENTED beats (top `frac` by onset strength = the bass drops).
+    Falls back to all beats when no per-beat strengths are available."""
+    if not grid.beats:
+        return []
+    if not grid.strengths or len(grid.strengths) != len(grid.beats):
+        return list(grid.beats)
+    s = np.asarray(grid.strengths, dtype=np.float64)
+    thr = float(np.quantile(s, max(0.0, min(1.0, 1.0 - frac))))
+    strong = [t for t, v in zip(grid.beats, grid.strengths) if v >= thr]
+    return strong or list(grid.beats)
 
 
 def _onset_beats(wav: np.ndarray, sr: int) -> BeatGrid:
@@ -76,9 +104,12 @@ def _onset_beats(wav: np.ndarray, sr: int) -> BeatGrid:
     beats = [round(i * 0.016, 3) for i in peaks]
     if len(beats) < 2:
         return BeatGrid()
+    # per-beat accent = onset flux at the peak (bass drops = strong onsets)
+    strengths = _norm01([flux[i] for i in peaks]).tolist()
     diffs = np.diff(beats)
     bpm = float(60.0 / np.median(diffs)) if len(diffs) else 0.0
-    return BeatGrid(bpm=round(bpm, 1), beats=beats)
+    return BeatGrid(bpm=round(bpm, 1), beats=beats,
+                    strengths=[round(float(s), 3) for s in strengths])
 
 
 def snap_to_beats(times, beats, max_shift: float = 0.12):
@@ -96,17 +127,24 @@ def snap_to_beats(times, beats, max_shift: float = 0.12):
 def beat_align_plan(plan, music_path: str, cfg: dict | None = None):
     """Snap an EditPlan's slow-mo beat onsets (and cut_in) to musical beats.
 
-    Returns (plan, changed). Safe no-op if no beats are found.
+    The AI-directed slow-mo lands on the nearest ACCENTED beat (bass drop) within
+    `beat_drop_max_shift`, so the highlight peaks on the drop; the cut_in snaps to
+    the nearest ordinary beat. Returns (plan, changed). Safe no-op if no beats.
     """
     cfg = cfg or {}
     grid = detect_beats(music_path, cfg)
     if not grid:
         return plan, False
-    max_shift = float(cfg.get("edit", {}).get("audio", {})
-                      .get("beat_snap_max_shift", 0.12))
+    a = cfg.get("edit", {}).get("audio", {})
+    max_shift = float(a.get("beat_snap_max_shift", 0.12))
+    drop_shift = float(a.get("beat_drop_max_shift", 0.35))
+    drops = strong_beats(grid, float(a.get("beat_drop_frac", 0.5)))
     changed = False
     for b in getattr(plan, "slowmo_beats", []):
-        new_start = snap_to_beats([b.start], grid.beats, max_shift)[0]
+        # prefer a bass drop (wider tolerance); else the nearest ordinary beat
+        new_start = snap_to_beats([b.start], drops, drop_shift)[0]
+        if abs(new_start - b.start) <= 1e-3:
+            new_start = snap_to_beats([b.start], grid.beats, max_shift)[0]
         if abs(new_start - b.start) > 1e-3:
             dur = b.end - b.start
             b.start = new_start
@@ -118,5 +156,5 @@ def beat_align_plan(plan, music_path: str, cfg: dict | None = None):
         changed = True
     if changed:
         log.info(f"[music] beat-aligned plan to {grid.bpm:.0f} BPM "
-                 f"({len(grid.beats)} beats)")
+                 f"({len(grid.beats)} beats, {len(drops)} drops)")
     return plan, changed

@@ -216,9 +216,19 @@ def _default_hook(kind: str, window, cfg) -> str:
     brand_hooks = (cfg.get("director", {}).get("hooks", {}) or {})
     if kind in brand_hooks and brand_hooks[kind]:
         return str(brand_hooks[kind][0]).upper()
+    meta = (getattr(window, "meta", {}) or {}) if window is not None else {}
+    energy = float(meta.get("energy", 0.0) or 0.0)
+    player = meta.get("player")
     score = ""
     if window is not None and getattr(window, "score_after", None):
         score = f" {window.score_after}"
+    # high-energy skill move -> punchy, context-aware hook (player from the log,
+    # so it is data-supported — not an invented name). The VLM Director writes
+    # the richer creative hook when configured; this is the offline fallback.
+    if kind == "skill":
+        if player and energy >= 0.5:
+            return f"{str(player).upper()} IN HACKER MODE"
+        return "HACKER MODE" if energy >= 0.5 else "OUTRAGEOUS SKILL!"
     defaults = {
         "goal": f"WHAT A GOAL!{score}",
         "chance": "SO CLOSE!",

@@ -203,6 +203,31 @@ def test_descriptive_events_delegates_text():
     print("  \u2713 descriptive loader delegates generic rows to load_events")
 
 
+def test_skill_energy_dynamic_window():
+    """A high-energy skill description ('outrageous solo run, insane nutmeg! 🔥')
+    is classified as a skill, scores higher energy, and earns a LONGER clip
+    window than a routine dribble."""
+    from src.detection.event_feed import (_map_kind, _skill_energy,
+                                          events_to_windows, load_events)
+    assert _map_kind("35' outrageous solo run by Yamal") == "skill"
+    assert _skill_energy("outrageous solo run, insane nutmeg! 🔥") > _skill_energy("dribble")
+
+    rows = [
+        {"minute": "10", "period": "1", "type": "skill", "text": "10' dribble"},
+        {"minute": "20", "period": "1", "type": "skill",
+         "text": "20' OUTRAGEOUS solo run, insane nutmeg! 🔥"},
+    ]
+    events = load_events(rows, CFG)
+    assert events[1].energy > events[0].energy, (events[0].energy, events[1].energy)
+    ws = events_to_windows(events, {1: 0}, CFG, duration=6000)
+    dur_routine = ws[0].end - ws[0].start
+    dur_hot = ws[1].end - ws[1].start
+    assert dur_hot > dur_routine + 1.0, (dur_routine, dur_hot)
+    assert ws[1].meta.get("energy", 0) > 0
+    print(f"  \u2713 skill energy: hot window {dur_hot:.1f}s > routine {dur_routine:.1f}s "
+          "(dynamic boundaries)")
+
+
 if __name__ == "__main__":
     test_text_parsing()
     test_csv_and_importance()
@@ -215,4 +240,5 @@ if __name__ == "__main__":
     test_statsbomb_json_parsing()
     test_soccernet_json_parsing()
     test_descriptive_events_delegates_text()
+    test_skill_energy_dynamic_window()
     print("\nALL EVENT-FEED TESTS PASSED \u2705")

@@ -92,6 +92,10 @@ detect:
     # once per match (e.g. 2nd half kicks off at 45:40 -> 2740).
     kickoffs: {}                  # e.g. {1: 0, 2: 2740}
     min_importance: 0.0           # drop feed events below this xT/importance
+    # dynamic clip sizing: a high-energy description ("outrageous solo run 🔥")
+    # extends the window by up to energy*boost seconds (buildup / celebration).
+    energy_pre_boost: 4.0         # extra pre-roll seconds at energy=1.0
+    energy_post_boost: 3.0        # extra post-roll seconds at energy=1.0
     align_to_ocr: true            # snap goal windows to the scoreboard OCR clock
     ocr_align_radius_seconds: 40.0
     top_n: 0                      # keep only the N strongest moments (0 = all)
@@ -200,7 +204,8 @@ telestration:
     - [60, 60, 255]             # team 0 -> neon red
     - [40, 230, 255]            # team 1 -> neon yellow
   trail_length: 12              # ball trail length in frames (10-15 = quick neon spark)
-  trail_max_jump_frac: 0.18     # drop trail segments longer than this*frame_w (ball can't teleport)
+  trail_max_jump_frac: 0.05     # FLUSH the trail if the ball jumps > this*frame_w in
+                                # one frame (noise re-detection) — kills "lines into the sky"
   halo_hold_frames: 6           # keep the hero halo for N frames if detection drops
   halo_smooth: 0.5              # EMA factor for the hero halo box (anti-flicker)
   possession_plate: true        # compact semi-transparent POSSESSION plate (bottom)
@@ -228,15 +233,15 @@ edit:
     target_aspect: "9:16"       # 9:16 | 1:1 | 16:9
     mode: action_track          # action_track | center | letterbox
     smoothing: 0.85             # camera smoothing for the virtual crop
-    # Aggressive action-centric punch-in: size the crop so the hero fills this
-    # fraction of the frame height (0.45 = hero ~45% tall). Lower = wider.
-    target_subject_height: 0.45
+    # Aggressive action-centric punch-in: size the crop so the hero (legs + ball)
+    # fills this fraction of the frame height (reference viral look = 0.65-0.70).
+    target_subject_height: 0.68
     min_zoom: 1.0               # never wider than full-height slice
     max_zoom: 2.6               # cap punch-in so a tiny far player doesn't over-zoom
     # Anticipation: shift the focus point ahead of the ball along its velocity so
-    # the camera LEADS the play instead of chasing it. 0 = no lead; 0.15-0.35 is
-    # natural. The lead is clamped so a noisy ball detection can't fling the crop.
-    lead_gain: 0.25             # focus lead = lead_gain * ball_velocity (per second)
+    # the camera LEADS the play instead of chasing it. 0.15 = lead by 15% of the
+    # ball's per-second travel. The lead is clamped so a noisy detection can't fling it.
+    lead_gain: 0.15             # focus lead = lead_gain * ball_velocity (per second)
     lead_max_frac: 0.18         # cap the lead offset at this fraction of frame size
     # Hard limits on how fast the crop window may pan/zoom (anti-jerk), applied
     # after Kalman smoothing. Fractions of frame size PER SECOND.
@@ -261,6 +266,8 @@ edit:
     loudness_target_lufs: -14   # social-platform target (TikTok/Reels/Shorts)
     beat_sync: false            # snap slow-mo onset / cut-in to the music beat
     beat_snap_max_shift: 0.12   # max seconds a timestamp may be nudged onto a beat
+    beat_drop_max_shift: 0.35   # wider tolerance to land AI slow-mo on a bass drop
+    beat_drop_frac: 0.5         # top-fraction of beats (by accent) treated as drops
     beat_min_beats_per_segment: 4  # compilation: min whole beats each segment lasts
   captions:
     enabled: true
@@ -271,17 +278,16 @@ edit:
                                 # kept above the bottom ~20% platform-UI band
     max_words_per_line: 4
     # ---- reference-look typography (sizes are fractions of frame height) ----
-    hook_scale: 0.032           # hook text height (~61px @1920) — was hard 0.045 ("too big")
+    hook_scale: 0.030           # hook text height (<=3% of frame height — compact)
     plate_scale: 0.020          # stat-plate text height (~38px @1920) — was 0.026
     max_lines: 2                # word-wrap the hook to at most N lines (never truncate)
     hook_y_frac: 0.13           # hook vertical anchor (top, reference-like)
     box_opacity: 0.30           # semi-transparent plate behind text (~30%)
     strip_emoji: true           # drop glyphs the TTF can't render (no tofu boxes)
-    # broadcast scoreboard/score-bug safe band at the top of the frame; when
-    # avoid_scoreboard is on, the hook is pushed just below it so overlays never
-    # sit on top of the live scoreboard.
+    # broadcast scoreboard/score-bug safe band at the top of the frame; the hook
+    # is pushed just below it so overlays never sit on top of the live scoreboard.
     scoreboard_safe_top_frac: 0.18
-    avoid_scoreboard: false     # true for broadcast footage with a top score bug
+    avoid_scoreboard: true      # keep the hook below the broadcaster scoreboard (top 18%)
     reaction_only: true         # stat plates only inside reaction/replay windows
 
 render:

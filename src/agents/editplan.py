@@ -92,6 +92,10 @@ class EditPlan:
     hashtags: list[str] = field(default_factory=list)
     pacing: str = "punchy"
     music_energy: str = "build"
+    # review-loop caption-safety corrections (set by apply_corrections when the
+    # Critic flags overlapping/unreadable text) — honoured by the renderer.
+    caption_safe: bool = False          # force the hook below the scoreboard band
+    hook_scale_mult: float = 1.0        # shrink the hook on a text-overlap revision
     source: str = "heuristic"
 
     def to_dict(self) -> dict:
@@ -226,5 +230,6 @@ def heuristic_plan(bundle, window=None, cfg: dict | None = None,
         p.hero_description = "the player on the ball"
     p.hook_text = _default_hook(kind, window, cfg)
     p.pacing = "punchy"
-    p.music_energy = "high" if kind == "goal" else "build"
+    p.music_energy = "high" if (kind in ("goal", "skill")
+                                or p.importance >= 0.8) else "build"
     return p
