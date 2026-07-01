@@ -107,6 +107,143 @@ def load_events(source: str | list | dict, cfg: dict | None = None) -> list[Matc
         return []
 
 
+def load_descriptive_events(source: str | list | dict,
+                            cfg: dict | None = None) -> list[MatchEvent]:
+    """Parse a MANUALLY-supplied descriptive match log into MatchEvents.
+
+    A superset of `load_events` that additionally understands the two common
+    analyst-export JSON shapes, so an operator can paste/upload real data
+    instead of relying on API guessing:
+
+      * **StatsBomb** open-data events — a list of event objects with
+        ``type.name`` (Shot/Dribble/Goal Keeper/…), ``minute``/``second``,
+        ``team.name``, ``player.name``, and outcome sub-objects
+        (``shot.outcome.name == 'Goal'``, ``foul_committed.card.name``, …).
+      * **SoccerNet** action labels — ``{"annotations": [{"gameTime": "1 - 12:34",
+        "label": "Goal", "team": "home"}, …]}`` (gameTime = half - MM:SS).
+
+    Anything else (generic CSV / free-text captions / generic JSON list) is
+    delegated to `load_events`. Never raises — returns [] on any failure.
+    """
+    try:
+        # resolve to in-memory data for JSON; delegate CSV/text to load_events
+        if isinstance(source, (list, dict)):
+            data = source
+        else:
+            path = str(source)
+            if path.lower().endswith(".json"):
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            else:
+                return load_events(source, cfg)
+
+        # SoccerNet: {"annotations": [...]}
+        if isinstance(data, dict) and isinstance(data.get("annotations"), list):
+            events = _parse_soccernet(data["annotations"])
+            log.info(f"[event_feed] SoccerNet log: {len(events)} events "
+                     f"({sum(e.kind == 'goal' for e in events)} goals)")
+            return events
+
+        rows = data.get("events", []) if isinstance(data, dict) else data
+        # StatsBomb: list of {"type": {"name": ...}, ...}
+        if _is_statsbomb(rows):
+            events = _parse_statsbomb(rows)
+            log.info(f"[event_feed] StatsBomb log: {len(events)} events "
+                     f"({sum(e.kind == 'goal' for e in events)} goals)")
+            return events
+
+        # generic JSON list/dict of rows
+        return _coerce_rows(rows if isinstance(rows, list) else [])
+    except FileNotFoundError:
+        log.warning(f"[event_feed] descriptive log not found: {source}")
+        return []
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[event_feed] failed to parse descriptive log: {exc}")
+        return []
+
+
+def _is_statsbomb(rows) -> bool:
+    return (isinstance(rows, list) and len(rows) > 0 and isinstance(rows[0], dict)
+            and isinstance(rows[0].get("type"), dict)
+            and "name" in rows[0]["type"])
+
+
+def _statsbomb_kind(tname: str, e: dict) -> str | None:
+    """Map a StatsBomb event to our clip kind, or None to ignore (pass/carry/…)."""
+    t = (tname or "").lower()
+    if t == "shot":
+        outcome = str((((e.get("shot") or {}).get("outcome")) or {})
+                      .get("name", "")).lower()
+        return "goal" if outcome == "goal" else "chance"
+    if t == "own goal against":
+        return "goal"
+    card = (((e.get("foul_committed") or {}).get("card"))
+            or ((e.get("bad_behaviour") or {}).get("card")) or {}).get("name")
+    if card:
+        return "card"
+    if t == "dribble":
+        return "skill"
+    if t in ("goal keeper", "goalkeeper"):
+        gk = str((((e.get("goalkeeper") or {}).get("type")) or {})
+                 .get("name", "")).lower()
+        if "save" in gk or "smother" in gk or "punch" in gk:
+            return "save"
+    return None
+
+
+def _parse_statsbomb(rows: list) -> list[MatchEvent]:
+    out: list[MatchEvent] = []
+    for e in rows:
+        if not isinstance(e, dict):
+            continue
+        tname = str(((e.get("type") or {}).get("name")) or "")
+        kind = _statsbomb_kind(tname, e)
+        if kind is None:
+            continue
+        minute = _to_int(e.get("minute"))
+        if minute is None:
+            continue
+        second = _to_float(e.get("second")) or 0.0
+        period = _to_int(e.get("period")) or (2 if minute >= 45 else 1)
+        team = _clean((e.get("team") or {}).get("name"))
+        player = _clean((e.get("player") or {}).get("name"))
+        label = tname
+        if kind == "card":
+            label = str((((e.get("foul_committed") or {}).get("card"))
+                         or ((e.get("bad_behaviour") or {}).get("card"))
+                         or {}).get("name", "Card"))
+        out.append(MatchEvent(
+            minute=minute, second=second, period=period, kind=kind,
+            team=team, player=player,
+            text=f"{minute}' {label}" + (f" — {player}" if player else "")))
+    return out
+
+
+_SOCCERNET_GT_RE = re.compile(r"\s*(\d)\s*-\s*(\d{1,3}):(\d{2})")
+
+
+def _parse_soccernet(annotations: list) -> list[MatchEvent]:
+    out: list[MatchEvent] = []
+    for a in annotations:
+        if not isinstance(a, dict):
+            continue
+        label = str(a.get("label", ""))
+        kind = _map_kind(label)
+        if kind is None:
+            continue
+        m = _SOCCERNET_GT_RE.match(str(a.get("gameTime", "")))
+        if not m:
+            continue
+        period = int(m.group(1)) or 1
+        mm, ss = int(m.group(2)), int(m.group(3))
+        base = _PERIOD_START_MIN.get(period, 0)
+        out.append(MatchEvent(
+            minute=base + mm, second=float(ss), period=period, kind=kind,
+            team=_clean(a.get("team")),
+            text=f"{a.get('gameTime', '')} {label}".strip()))
+    return out
+
+
 def load_from_espn(fixture_id, slug: str = "esp.1", cfg: dict | None = None,
                    timeout: float = 30.0) -> list[MatchEvent]:
     """Fetch goals/cards (+minutes/scorers) from ESPN's PUBLIC, KEYLESS API.

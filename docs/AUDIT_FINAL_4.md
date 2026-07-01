@@ -93,17 +93,28 @@ scoreboard_safe_top_frac,reaction_only}` присутствуют; шрифты 
 
 ## E — Web UI + dry-run (ядро проверено без gradio)
 
-- `src/detection/preview.py` (gradio-free): `event_feed_overrides` (детекторы /
-  текст-CSV / ESPN + kick-off), `preview_windows` (только Scout, без рендера) →
-  таблица минута/тип/confidence/таймкоды/verified/источники.
-- `app/webui.py`: секция «Источник моментов (v2) + dry-run» (radio источника,
-  поле отчёта, ESPN fixture+slug, два поля kick-off), кнопка dry-run + Dataframe,
-  тоггл occlusion. `render_job` прокидывает event_feed/occlusion/compilation
-  (beat_sync) в overrides. Число inputs `run_btn.click` = 25 = параметрам
-  `render_job` (для обоих движков); `preview_btn` = 9 = 9.
-- `test_preview.py`: timecode; overrides для детекторов/ESPN/текста (пишет
-  feed-файл); сквозной dry-run из вставленного отчёта размещает verified-гол на
-  правильном таймкоде БЕЗ рендера.
+- `src/detection/preview.py` (gradio-free): `event_feed_overrides` с ПРИОРИТЕТОМ
+  ручных данных (загруженный StatsBomb/SoccerNet JSON > вставленный
+  описательный лог/капшены > ESPN fixture (опц.) > детекторы); `preview_markdown`
+  (только Scout/парсинг лога, без рендера) → **markdown-таблица** окон
+  (мин/видео-таймкод/тип/verified/описание), работает даже до выбора видео.
+- `src/detection/event_feed.py::load_descriptive_events`: понимает **StatsBomb**
+  (Shot.outcome=Goal→goal, saved→chance, card, dribble→skill) и **SoccerNet**
+  (`annotations` c `gameTime "half - MM:SS"`), иначе делегирует в `load_events`
+  (текст/CSV/generic JSON). `scout` в рендер-пути тоже идёт через него, так что
+  JSON работает end-to-end.
+- `app/webui.py`: секция «Источник моментов (v2) + dry-run» — «Paste Descriptive
+  Match Log / Captions» (10 строк) + «Or Upload StatsBomb/SoccerNet JSON»
+  (`gr.File`), два поля kick-off, ESPN (опц.), кнопка dry-run → `gr.Markdown`.
+  Стратегия: РУЧНОЙ лог первичен, автопоиск (ESPN) — вторичен.
+- Инвариант параметров (проверено AST-скриптом): `render_job` **26** параметров
+  == **26** inputs `run_btn.click`; `preview_windows` **10** == **10** inputs
+  `preview_btn.click`. (Не 18: ветка уже несёт полный Block E — ESPN/kickoff/
+  occlusion; ломать рабочее ради числа не стал, инвариант «inputs==params, без
+  падений» соблюдён на реальном числе.)
+- `test_preview.py` + `test_event_feed.py`: overrides (детекторы/ESPN/текст/JSON,
+  приоритет загруженного файла); StatsBomb/SoccerNet парсинг; markdown dry-run из
+  вставленного лога (без видео) и из StatsBomb-JSON; graceful на пустом вводе.
 - Граница честности: сам gradio в песочнице не установлен → UI-логика вынесена в
   тестируемый модуль; фактический запуск сервера = verify on Modal (см. G).
 

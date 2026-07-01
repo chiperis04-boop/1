@@ -203,16 +203,17 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
                use_vision, slowmo, freeze, telestration, limit, zscore,
                min_conf, music_vol, engine, v2_director, v2_team_halos,
                v2_jerseys, v2_pitch, v2_occlusion, event_source, feed_text,
-               espn_fixture, espn_slug, ko1, ko2):
+               feed_file, espn_fixture, espn_slug, ko1, ko2):
     """Generator: streams a log, then yields final preview state.
 
     Supports two engines:
       * "Classic (v1)" — src.runner.run_pipeline (audio/scene fusion pipeline)
       * "Studio (v2)"  — src.studio_pipeline.run_studio (Scout -> Director ->
                           Cameraman BoT-SORT+CMC -> teams/jersey/possession
-                          analytics -> Composer). The moment source can be the
-                          detectors, a pasted text/CSV report, or an ESPN
-                          fixture, with per-half kick-off offsets.
+                          analytics -> Composer). The moment source is, in
+                          priority order: an uploaded StatsBomb/SoccerNet JSON,
+                          a pasted descriptive match log, an ESPN fixture, or the
+                          detectors — with per-half kick-off offsets.
     """
     empty = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
@@ -244,9 +245,9 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
             "director": {"backend": str(v2_director)},
             "render": {"output_mode": output_mode},
         }
-        # event-feed moment source (text/CSV report or ESPN fixture) + kick-offs
-        ef = _event_feed_overrides(event_source, feed_text, espn_fixture,
-                                   espn_slug, ko1, ko2, match_name)
+        # moment source (uploaded JSON / pasted log / ESPN fixture) + kick-offs
+        ef = _event_feed_overrides(event_source, feed_text, feed_file,
+                                   espn_fixture, espn_slug, ko1, ko2, match_name)
         if ef:
             overrides["detect"] = {"event_feed": ef}
         # compilation reel target (also turns on beat-synced cut points)
@@ -394,30 +395,25 @@ def on_pick_clip(clip_path):
 # event-feed source + dry-run moment preview (v2) — pure logic in
 # src.detection.preview (gradio-free, unit-tested); these are thin wrappers.
 # --------------------------------------------------------------------------- #
-def _event_feed_overrides(event_source, feed_text, espn_fixture, espn_slug,
-                          ko1, ko2, match_name):
+def _event_feed_overrides(event_source, feed_text, feed_file, espn_fixture,
+                          espn_slug, ko1, ko2, match_name):
     from src.detection.preview import event_feed_overrides
-    return event_feed_overrides(event_source, feed_text, espn_fixture, espn_slug,
-                                ko1, ko2, match_name, feed_dir=str(INPUT_DIR))
+    return event_feed_overrides(event_source, feed_text, feed_file, espn_fixture,
+                                espn_slug, ko1, ko2, match_name,
+                                feed_dir=str(INPUT_DIR))
 
 
-def preview_windows(video_path, server_pick, event_source, feed_text,
+def preview_windows(video_path, server_pick, event_source, feed_text, feed_file,
                     espn_fixture, espn_slug, ko1, ko2, limit):
-    """DRY-RUN: list the moments the Scout WOULD clip (minute/type/confidence/
-    timecode) WITHOUT rendering, so the operator can validate the selection
-    first (ClipMaker-style). Returns (log, table_rows)."""
+    """DRY-RUN: parse the manual match log (or run the Scout) and return a
+    scannable MARKDOWN table of the moments that WOULD be clipped — BEFORE any
+    render — so the operator can validate the selection. Returns (log, markdown).
+    """
+    from src.detection.preview import preview_markdown
     chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
-    if not chosen:
-        return ("⚠️ Загрузите видео или выберите файл на сервере для preview.", [])
-    from src.detection.preview import preview_windows as _preview
-    ef = _event_feed_overrides(event_source, feed_text, espn_fixture, espn_slug,
-                               ko1, ko2, Path(chosen).stem)
-    rows, summary = _preview(chosen, ef, limit=int(limit) if limit else 0)
-    if not rows:
-        return (f"👁 Dry-run: {summary}. Для отчёта/ESPN укажите kick-off (сек) "
-                "и источник; для детекторов нужен звук/табло в видео.", [])
-    log = (f"👁 Dry-run: {summary} — проверьте отбор, затем «Render highlights».")
-    return (log, rows)
+    return preview_markdown(chosen or None, event_source, feed_text, feed_file,
+                            espn_fixture, espn_slug, ko1, ko2, limit,
+                            feed_dir=str(INPUT_DIR))
 
 
 # --------------------------------------------------------------------------- #
@@ -495,27 +491,31 @@ def build() -> gr.Blocks:
                     with gr.Accordion("Источник моментов (v2) + dry-run", open=True):
                         event_source = gr.Radio(
                             ["Детекторы (авто)", "Текст/CSV отчёт", "ESPN (fixture)"],
-                            value="Детекторы (авто)", label="Откуда брать моменты",
-                            info="Отчёт/ESPN = самый надёжный отбор; укажите "
-                                 "kick-off (сек видео) чтобы привязать минуту матча")
+                            value="Текст/CSV отчёт", label="Откуда брать моменты",
+                            info="Вставьте свой лог/JSON ниже (приоритетно и "
+                                 "надёжнее автопоиска). Укажите kick-off (сек "
+                                 "видео), чтобы привязать минуту матча к таймкоду.")
                         feed_text = gr.Textbox(
-                            lines=4, label="Отчёт матча (текст/CSV)",
+                            lines=10, label="Paste Descriptive Match Log / Captions",
                             placeholder="67' GOAL — Messi (Argentina)\n"
                                         "73' yellow card, Rodri (Spain)\n"
-                                        "или CSV: minute,team,player,type")
+                                        "или CSV: minute,team,player,type\n"
+                                        "или вставьте StatsBomb/SoccerNet JSON")
+                        feed_file = gr.File(
+                            label="Or Upload StatsBomb/SoccerNet JSON",
+                            file_types=[".json"], type="filepath")
                         with gr.Row():
-                            espn_fixture = gr.Textbox(label="ESPN fixture_id", scale=2)
+                            espn_fixture = gr.Textbox(label="ESPN fixture_id (optional)",
+                                                      scale=2)
                             espn_slug = gr.Textbox(value="esp.1", label="ESPN slug",
                                                    scale=1)
                         with gr.Row():
                             ko1 = gr.Number(value=0, label="Kick-off 1-й тайм (сек)")
                             ko2 = gr.Number(value=0, label="Kick-off 2-й тайм (сек)")
                         preview_btn = gr.Button("👁 Показать выбранные моменты (dry-run)")
-                        preview_table = gr.Dataframe(
-                            headers=["Мин", "Тип", "Conf", "Старт", "Момент",
-                                     "Конец", "✓", "Источники"],
-                            label="Отобранные окна (до рендера)", interactive=False,
-                            wrap=True)
+                        preview_md = gr.Markdown(
+                            "_Вставьте лог/JSON и нажмите dry-run, чтобы увидеть "
+                            "отобранные моменты ДО рендера._")
                     with gr.Accordion("Detection tuning", open=False):
                         limit = gr.Slider(0, 30, value=0, step=1,
                                           label="Max clips (0 = all)")
@@ -549,15 +549,15 @@ def build() -> gr.Blocks:
                         use_vision, slowmo, freeze, telestration,
                         limit, zscore, min_conf, music_vol,
                         engine, v2_director, v2_team_halos, v2_jerseys, v2_pitch,
-                        v2_occlusion, event_source, feed_text, espn_fixture,
-                        espn_slug, ko1, ko2],
+                        v2_occlusion, event_source, feed_text, feed_file,
+                        espn_fixture, espn_slug, ko1, ko2],
                 outputs=[logbox, clip_dd, preview, caption, files, status_match],
             )
             preview_btn.click(
                 preview_windows,
-                inputs=[video, server_pick, event_source, feed_text, espn_fixture,
-                        espn_slug, ko1, ko2, limit],
-                outputs=[logbox, preview_table])
+                inputs=[video, server_pick, event_source, feed_text, feed_file,
+                        espn_fixture, espn_slug, ko1, ko2, limit],
+                outputs=[logbox, preview_md])
             status_btn.click(
                 job_status, inputs=status_match,
                 outputs=[logbox, clip_dd, preview, caption, files])

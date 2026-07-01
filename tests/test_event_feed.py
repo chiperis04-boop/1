@@ -147,6 +147,62 @@ def test_cutaway_gate():
     print("  \u2713 cutaway gate drops bench/crowd, keeps real play & verified goals")
 
 
+def test_statsbomb_json_parsing():
+    """load_descriptive_events understands StatsBomb open-data events: a Shot
+    with outcome Goal -> goal, a saved Shot -> chance, a card, a dribble -> skill;
+    passes/carries are ignored."""
+    from src.detection.event_feed import load_descriptive_events
+    rows = [
+        {"type": {"name": "Shot"}, "minute": 23, "second": 10, "period": 1,
+         "team": {"name": "Reds"}, "player": {"name": "Ann"},
+         "shot": {"outcome": {"name": "Goal"}}},
+        {"type": {"name": "Shot"}, "minute": 30, "period": 1,
+         "player": {"name": "Bo"}, "shot": {"outcome": {"name": "Saved"}}},
+        {"type": {"name": "Bad Behaviour"}, "minute": 40, "period": 1,
+         "player": {"name": "Cy"}, "bad_behaviour": {"card": {"name": "Yellow Card"}}},
+        {"type": {"name": "Dribble"}, "minute": 55, "period": 2,
+         "player": {"name": "Di"}},
+        {"type": {"name": "Pass"}, "minute": 10, "period": 1},   # ignored
+    ]
+    events = load_descriptive_events(rows)
+    kinds = [e.kind for e in events]
+    assert kinds == ["goal", "chance", "card", "skill"], kinds
+    goal = events[0]
+    assert goal.minute == 23 and goal.period == 1 and goal.player == "Ann"
+    assert events[2].kind == "card" and "Yellow" in events[2].text
+    print("  \u2713 StatsBomb JSON: Shot->goal/chance, card, dribble->skill; pass ignored")
+
+
+def test_soccernet_json_parsing():
+    """load_descriptive_events understands SoccerNet action labels with
+    gameTime 'half - MM:SS'; substitutions are ignored."""
+    from src.detection.event_feed import load_descriptive_events
+    data = {"annotations": [
+        {"gameTime": "1 - 00:03", "label": "Goal", "team": "home"},
+        {"gameTime": "2 - 05:00", "label": "Yellow card", "team": "away"},
+        {"gameTime": "1 - 10:00", "label": "Substitution"},         # ignored
+        {"gameTime": "1 - 12:30", "label": "Shots on target"},
+    ]}
+    events = load_descriptive_events(data)
+    kinds = [e.kind for e in events]
+    assert kinds == ["goal", "card", "chance"], kinds
+    goal = events[0]
+    assert goal.period == 1 and goal.minute == 0 and abs(goal.second - 3) < 1e-6
+    card = events[1]
+    assert card.period == 2 and card.minute == 50, (card.period, card.minute)
+    print("  \u2713 SoccerNet JSON: half-MM:SS -> period/minute; sub ignored")
+
+
+def test_descriptive_events_delegates_text():
+    """A pasted .txt / list without StatsBomb shape still goes through the
+    generic parser (backward compatible)."""
+    from src.detection.event_feed import load_descriptive_events
+    rows = [{"minute": "12", "period": "1", "team": "A", "type": "goal"}]
+    events = load_descriptive_events(rows)
+    assert len(events) == 1 and events[0].kind == "goal"
+    print("  \u2713 descriptive loader delegates generic rows to load_events")
+
+
 if __name__ == "__main__":
     test_text_parsing()
     test_csv_and_importance()
@@ -156,4 +212,7 @@ if __name__ == "__main__":
     test_espn_keyevents_parsing()
     test_top_n_selection()
     test_cutaway_gate()
+    test_statsbomb_json_parsing()
+    test_soccernet_json_parsing()
+    test_descriptive_events_delegates_text()
     print("\nALL EVENT-FEED TESTS PASSED \u2705")

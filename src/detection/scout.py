@@ -73,14 +73,15 @@ def scout_events(
     if ef.get("enabled"):
         try:
             from .event_feed import (align_to_ocr, events_to_windows,
-                                     load_events, load_from_espn)
+                                     load_descriptive_events, load_from_espn)
             events = []
             espn = ef.get("espn", {}) or {}
             if espn.get("enabled") and espn.get("fixture_id"):
                 events = load_from_espn(espn.get("fixture_id"),
                                         espn.get("slug", "esp.1"), cfg)
             elif ef.get("source"):
-                events = load_events(ef["source"], cfg)
+                # descriptive log: text/CSV report OR StatsBomb/SoccerNet JSON
+                events = load_descriptive_events(ef["source"], cfg)
             fw = events_to_windows(events, ef.get("kickoffs", {}), cfg, duration) \
                 if events else []
             if fw:
