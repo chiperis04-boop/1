@@ -345,6 +345,12 @@ director:
   drop_cutaways: true
   cutaway_min_ball_frac: 0.05
   cutaway_min_players: 3.0
+  # per-shot action-span trim: within a kept clip, drop leading/trailing cutaway
+  # SHOTS (crowd / celebration close-ups / replay graphics) and keep only the
+  # contiguous run of real play around the action. Contiguous -> audio stays in
+  # sync. Reuses cutaway_min_* thresholds.
+  trim_cutaways: true
+  action_min_seconds: 5.0        # never trim the play below this many seconds
   # offline hook fallbacks if no LLM and no brand hooks
   hooks: {}
 

@@ -258,7 +258,7 @@ class RawFrameSink:
 
     def __init__(self, out_path: str, width: int, height: int, fps: float,
                  encoder: str = "libx264", audio_src: str | None = None,
-                 intermediate: bool = False):
+                 intermediate: bool = False, audio_start: float = 0.0):
         self.out_path = out_path
         self.width = int(width)
         self.height = int(height)
@@ -271,6 +271,10 @@ class RawFrameSink:
         ]
         has_aud = bool(audio_src) and has_audio(audio_src)
         if has_aud:
+            # audio_start offsets the muxed audio so it stays in sync when only a
+            # sub-range of frames is rendered (action-span trim).
+            if audio_start and audio_start > 0:
+                cmd += ["-ss", f"{float(audio_start):.3f}"]
             cmd += ["-i", audio_src, "-map", "0:v:0", "-map", "1:a:0"]
         else:
             cmd += ["-f", "lavfi", "-i",

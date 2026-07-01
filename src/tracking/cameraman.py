@@ -348,28 +348,41 @@ class Cameraman:
     # --------------------------------------------------------------- render
     def render(self, clip_path: str, plan: CropPlan, out_path: str,
                annotate_world=None, annotate_screen=None,
-               intermediate: bool = False) -> str:
+               intermediate: bool = False, frame_range=None) -> str:
         """Crop every frame to its planned window and resize to the target
         9:16 profile, then mux the original audio back (audio-safe).
+
+        `frame_range=(i0,i1)` renders only that contiguous slice of frames (the
+        action span, cutaways trimmed) and offsets the muxed audio to match, so
+        video+audio stay in sync. Annotators still receive the ORIGINAL frame
+        index (the crop plan is per-original-frame).
 
         Optional annotators merge graphics into THIS pass (one fewer encode):
           * annotate_world(frame, idx) runs on the ORIGINAL frame before the crop
             (pitch-space halos/trail),
           * annotate_screen(frame, idx) runs on the cropped OUTPUT frame
-            (screen-space HUD like the possession plate).
-        Frames are piped straight into a single H.264 encode (no lossy mp4v
-        intermediate); the upscaled crop uses Lanczos for crispness."""
+            (screen-space HUD like the possession plate)."""
         import cv2
 
+        i0, i1 = (int(frame_range[0]), int(frame_range[1])) if frame_range \
+            else (0, 1 << 30)
+        i0 = max(0, i0)
+        audio_start = (i0 / plan.fps) if i0 > 0 and plan.fps else 0.0
         cap = cv2.VideoCapture(clip_path)
         encoder = ff.pick_encoder(self.cfg.get("render", {}).get("encoder", "libx264"))
         sink = ff.RawFrameSink(out_path, plan.out_w, plan.out_h, plan.fps,
                                encoder, audio_src=clip_path,
-                               intermediate=intermediate)
+                               intermediate=intermediate, audio_start=audio_start)
         idx = 0
+        written = 0
         while True:
             ok, frame = cap.read()
             if not ok:
+                break
+            if idx < i0:
+                idx += 1
+                continue
+            if idx >= i1:
                 break
             if annotate_world is not None:
                 frame = annotate_world(frame, idx)       # pitch-space, pre-crop
@@ -382,11 +395,13 @@ class Cameraman:
             if annotate_screen is not None:
                 crop = annotate_screen(crop, idx)        # HUD-space, post-crop
             sink.write(crop)
+            written += 1
             idx += 1
         cap.release()
         sink.close()
         log.info(f"[cameraman] {plan.out_w}x{plan.out_h} CMC reframe -> "
-                 f"{Path(out_path).name} (hero={plan.hero_id})")
+                 f"{Path(out_path).name} (hero={plan.hero_id}, {written} frames"
+                 f"{'' if frame_range is None else f', span {i0}-{idx}'})")
         return out_path
 
 

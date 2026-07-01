@@ -98,6 +98,36 @@ def test_disabled_single_shot(tmp):
     print("  ✓ disabled -> graceful single shot spanning the clip")
 
 
+def test_action_span_drops_cutaways():
+    """select_action_span keeps the contiguous run of real play and drops
+    leading crowd + trailing celebration cutaway shots (CPU-only)."""
+    from types import SimpleNamespace as NS
+
+    from src.perception.shots import Shot, select_action_span
+
+    def fr(nplayers, ball):
+        return NS(players=[{}] * nplayers,
+                  ball=({"center": [1, 1]} if ball else None))
+
+    # shot0 crowd (0 players, no ball) | shot1 PLAY (players+ball) | shot2 celebration
+    frames = ([fr(0, False)] * 30 + [fr(6, True)] * 60 + [fr(1, False)] * 30)
+    shots = [Shot(0, 0.0, 1.0, 0, 30),
+             Shot(1, 1.0, 3.0, 30, 90),
+             Shot(2, 3.0, 4.0, 90, 120)]
+    cfg = {"director": {"trim_cutaways": True, "cutaway_min_players": 3.0,
+                        "cutaway_min_ball_frac": 0.05, "action_min_seconds": 1.0}}
+    span = select_action_span(shots, frames, cfg)
+    assert span == (30, 90), span
+    # disabled -> keep whole clip
+    cfg["director"]["trim_cutaways"] = False
+    assert select_action_span(shots, frames, cfg) is None
+    # all playable -> nothing to trim
+    allplay = [fr(6, True)] * 120
+    cfg["director"]["trim_cutaways"] = True
+    assert select_action_span(shots, allplay, cfg) is None
+    print("  ✓ action-span: drops crowd(pre)+celebration(post), keeps play [30,90)")
+
+
 def main() -> int:
     ff.ensure_tools()
     print("shot-segmentation tests")
@@ -106,6 +136,7 @@ def main() -> int:
         test_segment_and_tile(tmp)
         test_duplicate_replay_flag(tmp)
         test_disabled_single_shot(tmp)
+        test_action_span_drops_cutaways()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("\nALL SHOT TESTS PASSED ✅")

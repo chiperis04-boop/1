@@ -261,6 +261,21 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         # reaction/celebration windows (clip seconds) for stat-card gating:
         # broadcast replay inserts are natural reaction cuts.
         reaction = [(s.start, s.end) for s in shots if getattr(s, "is_replay", False)]
+
+        # ACTION-SPAN TRIM: drop leading/trailing cutaways (crowd / celebration /
+        # replay graphics) so the clip is just the play. Contiguous span -> audio
+        # stays in sync; beats/reaction are shifted into the trimmed timeline.
+        from .perception.shots import select_action_span
+        span = select_action_span(shots, frames, cfg)
+        _fps = float(meta.get("fps", 25.0)) or 25.0
+        span_t0 = (span[0] / _fps) if span else 0.0
+        span_t1 = (span[1] / _fps) if span else None
+        if span:
+            reaction = [(max(0.0, s - span_t0), e - span_t0) for (s, e) in reaction
+                        if e > span_t0 and (span_t1 is None or s < span_t1)]
+            log.info(f"[studio] action-span trim: frames {span[0]}-{span[1]} "
+                     f"({span_t0:.1f}-{span_t1:.1f}s), cutaways dropped")
+
         counter = {"n": 0}
         # capture the base caption look so a text-overlap revision recomputes from
         # it (no compounding across revisions)
@@ -283,10 +298,18 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
                                                          analytics)
             rf = cam.render(clip, cplan, str(work / f"reframed_{k}.mp4"),
                             annotate_world=world, annotate_screen=screen,
-                            intermediate=True)
+                            intermediate=True, frame_range=span)
+            # shift slow-mo beats into the trimmed timeline (drop those outside)
+            beats = p.slowmo_beats
+            if span and beats:
+                import dataclasses
+                beats = [dataclasses.replace(b, start=b.start - span_t0,
+                                             end=b.end - span_t0)
+                         for b in beats
+                         if b.start >= span_t0 and (span_t1 is None or b.start < span_t1)]
             outp = str(work / f"render_{k}.mp4")
             composer.finish(rf, outp, manifest=p.to_manifest(), stats=stats,
-                            beats=p.slowmo_beats, reaction=reaction)
+                            beats=beats, reaction=reaction)
             return outp
 
         final = str(Path(out_dir) / f"{i:02d}_{w.kind}.mp4")

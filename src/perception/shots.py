@@ -234,3 +234,73 @@ def _corr(a, b, np) -> float:
     am, bm = a - a.mean(), b - b.mean()
     denom = (np.linalg.norm(am) * np.linalg.norm(bm))
     return float(am.dot(bm) / denom) if denom else 0.0
+
+
+
+def shot_activity(shots, frames):
+    """Per-shot play density: average players on screen + fraction of frames with
+    a visible ball. Cutaways (crowd / celebration close-ups / replay graphics)
+    have few players AND no ball; real action has players and/or the ball."""
+    out = []
+    n = len(frames)
+    for s in shots:
+        a, b = max(0, s.start_frame), min(n, s.end_frame)
+        rng = frames[a:b]
+        if not rng:
+            out.append({"shot": s, "avg_players": 0.0, "ball_frac": 0.0})
+            continue
+        players = sum(len(getattr(f, "players", []) or []) for f in rng) / len(rng)
+        ball = sum(1 for f in rng if getattr(f, "ball", None)) / len(rng)
+        out.append({"shot": s, "avg_players": players, "ball_frac": ball})
+    return out
+
+
+def select_action_span(shots, frames, cfg=None, anchor_frame=None):
+    """(i0, i1) frame range of the best CONTIGUOUS run of PLAYABLE shots (real
+    action) around the anchor, dropping leading/trailing cutaways (crowd /
+    celebration / replay graphics). Returns None to keep the whole clip when the
+    feature is off, there is nothing to trim, or the signal is ambiguous."""
+    cfg = cfg or {}
+    d = cfg.get("director", {})
+    if not d.get("trim_cutaways", True):
+        return None
+    if not shots or len(shots) < 2 or not frames:
+        return None
+    min_players = float(d.get("cutaway_min_players", 3.0))
+    min_ball = float(d.get("cutaway_min_ball_frac", 0.05))
+    min_span_s = float(d.get("action_min_seconds", 5.0))
+
+    act = shot_activity(shots, frames)
+    playable = [(a["avg_players"] >= min_players or a["ball_frac"] >= min_ball)
+                for a in act]
+    if all(playable) or not any(playable):
+        return None                                # nothing to trim / ambiguous
+
+    # contiguous runs of playable shots
+    runs, i = [], 0
+    while i < len(playable):
+        if playable[i]:
+            j = i
+            while j + 1 < len(playable) and playable[j + 1]:
+                j += 1
+            runs.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+
+    chosen = None
+    if anchor_frame is not None:
+        for r in runs:
+            if shots[r[0]].start_frame <= anchor_frame < shots[r[1]].end_frame:
+                chosen = r
+                break
+    if chosen is None:
+        chosen = max(runs, key=lambda r: shots[r[1]].end_frame - shots[r[0]].start_frame)
+
+    i0, i1 = shots[chosen[0]].start_frame, shots[chosen[1]].end_frame
+    total = shots[-1].end_frame
+    if (i1 - i0) >= 0.92 * total:                  # basically the whole clip
+        return None
+    if (shots[chosen[1]].end - shots[chosen[0]].start) < min_span_s:
+        return None                                # too short -> keep clip
+    return (i0, i1)
