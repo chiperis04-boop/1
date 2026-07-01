@@ -98,6 +98,24 @@ def scout_events(
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[scout] event feed unavailable ({exc}); detector discovery")
 
+    # 0.5) reel survey (VLM whole-video understanding) — for pre-made highlights
+    #      reels: the Director looks at the ENTIRE reel and picks the real
+    #      highlight moments (goal/skill/save/chance) on scene-cut boundaries,
+    #      dropping midfield passes / replays / celebration. Primary source for
+    #      the 'detectors (auto)' path; falls through if no VLM is configured.
+    rs = cfg.get("detect", {}).get("reel_survey", {})
+    if rs.get("enabled", False):
+        try:
+            from .reel_survey import survey_reel
+            rw = survey_reel(video_path, cfg, duration)
+            if rw:
+                log.info(f"[scout] reel-survey: {len(rw)} highlight window(s) "
+                         f"({sum(w.kind == 'goal' for w in rw)} goals)")
+                return rw
+            log.info("[scout] reel-survey found nothing; detector discovery")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[scout] reel-survey unavailable ({exc}); detectors")
+
     # 1) named events (goal/shot/card/...) from the action-spotting model
     action_sigs: list[Signal] = []
     try:

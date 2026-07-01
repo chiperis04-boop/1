@@ -107,6 +107,18 @@ detect:
       slug: esp.1
       fixture_id: null
 
+  # ---- reel survey (v2): VLM understands a WHOLE highlights reel + picks the
+  #      real highlight moments on scene-cut boundaries. Primary moment source
+  #      for the 'detectors (auto)' path when a vision-LLM (llm: section) is
+  #      configured; drops midfield passes / replays / celebration. Falls back to
+  #      detector discovery if no VLM. Ideal for 15-20 min pre-made reels.
+  reel_survey:
+    enabled: true
+    moment_min_seconds: 6.0       # merge scene cuts into moments at least this long
+    max_moments: 40               # cap segments surveyed (merges shortest first)
+    cells_per_sheet: 20           # keyframes per contact-sheet sent to the VLM
+    top_n: 0                      # keep only the N strongest picks (0 = all)
+
 fusion:
   # final score = weighted sum of normalized signal strengths
   weights:
