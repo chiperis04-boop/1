@@ -233,11 +233,14 @@ edit:
     target_aspect: "9:16"       # 9:16 | 1:1 | 16:9
     mode: action_track          # action_track | center | letterbox
     smoothing: 0.85             # camera smoothing for the virtual crop
-    # Aggressive action-centric punch-in: size the crop so the hero (legs + ball)
-    # fills this fraction of the frame height (reference viral look = 0.65-0.70).
-    target_subject_height: 0.68
+    # Aggressive action-centric punch-in, BUT bounded so we never up-scale a
+    # 1080p broadcast into a blurry mess. A 9:16 slice of 1080p is already ~1.8x
+    # up-scaled to 1080x1920; extra zoom multiplies that. 0.55 target + 1.5 max
+    # keeps total up-scale ~2.3x (still sharp). For a true 65-70% fill you need a
+    # 4K source — otherwise the punch-in pixelates on wide crowd/replay shots.
+    target_subject_height: 0.55
     min_zoom: 1.0               # never wider than full-height slice
-    max_zoom: 2.6               # cap punch-in so a tiny far player doesn't over-zoom
+    max_zoom: 1.5               # anti-blur cap (was 2.6 -> heavy up-scale on wide shots)
     # Anticipation: shift the focus point ahead of the ball along its velocity so
     # the camera LEADS the play instead of chasing it. 0.15 = lead by 15% of the
     # ball's per-second travel. The lead is clamped so a noisy detection can't fling it.

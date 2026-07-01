@@ -106,7 +106,10 @@ def _overlay_specs(moment: Moment, stats: dict, branding: dict,
     lt = branding.get("lower_third", {})
     if lt.get("enabled"):
         label = moment.kind.upper()
-        if lt.get("show_minute") and moment.minute is not None:
+        # only show the minute when it is actually known (>0). OCR-detected goals
+        # without a kick-off mapping have minute 0 -> "GOAL - 0'" looks broken, so
+        # we drop it rather than print a wrong clock.
+        if lt.get("show_minute") and moment.minute:
             label += f"  -  {moment.minute}'"
         fs = 38 if composer_typography else 46
         specs.append((label,
