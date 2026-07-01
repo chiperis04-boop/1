@@ -106,6 +106,10 @@ class Composer:
 
         Merging annotation into the crop pass removes a whole lossy re-encode
         generation, and splitting world/screen fixes HUD positioning.
+
+        When `telestration.occlusion` is on AND a YOLO-seg model is available,
+        world() composites the graphics UNDER the player masks (real occlusion);
+        otherwise it draws the grounded lower-arc halo (seg-free approximation).
         """
         tele = self.cfg.get("telestration", {})
         hero_id = (getattr(analytics, "hero_id", None)
@@ -113,11 +117,12 @@ class Composer:
         frames = getattr(track, "frames", [])
         ball_trail: list[tuple[float, float]] = []
         hero_state: dict = {}
+        occluder = self._occluder()
 
         def world(frame, idx):
             ft = frames[idx] if idx < len(frames) else None
             return self._annotate_frame(frame, ft, hero_id, ball_trail, tele,
-                                        analytics, hero_state)
+                                        analytics, hero_state, occluder)
 
         def screen(frame, idx):
             ft = frames[idx] if idx < len(frames) else None
@@ -125,6 +130,28 @@ class Composer:
             return frame
 
         return world, screen
+
+    def _occluder(self):
+        """Lazily build the seg-mask Occluder once per Composer, only if
+        occlusion is enabled AND the model actually loads (else None -> the
+        grounded-arc halo fallback). Cached so the model loads a single time."""
+        if getattr(self, "_occluder_cache", "unset") != "unset":
+            return self._occluder_cache
+        occ = None
+        if self.cfg.get("telestration", {}).get("occlusion", False):
+            try:
+                from ..graphics.occlusion import Occluder
+                cand = Occluder(self.cfg)
+                if cand.available():
+                    occ = cand
+                else:
+                    log.warning("[composer] occlusion requested but seg model "
+                                "unavailable; grounded-arc halo fallback")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[composer] occluder init failed ({exc}); "
+                            "grounded-arc halo fallback")
+        self._occluder_cache = occ
+        return occ
 
     def draw_graphics(self, clip_path, out_path, track, manifest, homography,
                       analytics=None):
@@ -155,13 +182,71 @@ class Composer:
         return out_path
 
     def _annotate_frame(self, frame, ft, hero_id, ball_trail, tele, analytics=None,
-                        hero_state=None):
+                        hero_state=None, occluder=None):
+        """Draw player halos + ball trail (+ hero number label).
+
+        Two paths:
+          * occluder given -> draw rings/trail on a transparent BGRA layer, get
+            the player seg-mask, and composite the layer UNDER the players
+            (real occlusion); full rings read best since players sit on top.
+          * else -> draw directly on the frame using the grounded lower-arc halo
+            (seg-free occlusion approximation).
+        The hero number label is always drawn last, ON TOP of everything.
+        """
         import cv2
+        import numpy as np
         if ft is None:
             return frame
+
+        if occluder is not None:
+            layer = np.zeros((frame.shape[0], frame.shape[1], 4), dtype=np.uint8)
+            hero_box = self._draw_rings_trail(layer, ft, hero_id, ball_trail, tele,
+                                              analytics, hero_state, grounded=False,
+                                              bgra=True)
+            mask = occluder.player_mask(frame)
+            if mask is not None:
+                from ..graphics.homography import composite_under_players
+                frame = composite_under_players(
+                    frame, layer, mask,
+                    alpha=float(tele.get("occlusion_alpha", 0.85)))
+            else:
+                # mask unavailable this frame: blend the layer on top (still
+                # correct graphics, just not occluded) rather than losing them
+                from ..graphics.homography import composite_under_players
+                frame = composite_under_players(
+                    frame, layer, None,
+                    alpha=float(tele.get("occlusion_alpha", 0.85)))
+        else:
+            grounded = tele.get("halo_grounded", True)
+            hero_box = self._draw_rings_trail(frame, ft, hero_id, ball_trail, tele,
+                                              analytics, hero_state,
+                                              grounded=grounded, bgra=False)
+
+        # hero jersey number label — always on top
+        if hero_box is not None and analytics is not None:
+            num = analytics.jerseys.number_of.get(hero_id)
+            if num is not None:
+                col = analytics.color_for_track(hero_id,
+                                                tuple(tele.get("spotlight_color",
+                                                               [0, 220, 255])))
+                x1, y1 = int(hero_box[0]), int(hero_box[1])
+                cv2.putText(frame, f"#{num}", (x1, max(12, y1 - 8)),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
+                cv2.putText(frame, f"#{num}", (x1, max(12, y1 - 8)),
+                            cv2.FONT_HERSHEY_DUPLEX, 0.9,
+                            tuple(int(c) for c in col), 2, cv2.LINE_AA)
+        return frame
+
+    def _draw_rings_trail(self, canvas, ft, hero_id, ball_trail, tele,
+                          analytics=None, hero_state=None, grounded=True,
+                          bgra=False):
+        """Draw team halos, the hero halo and the ball trail onto `canvas`
+        (a BGR frame, or a transparent BGRA layer when bgra=True). Returns the
+        hero's box (for the number label) or None. Pure drawing — no compositing.
+        """
         default_color = tuple(tele.get("spotlight_color", [0, 220, 255]))
         team_halos = tele.get("team_halos", True) and analytics is not None
-        grounded = tele.get("halo_grounded", True)
+        thick = max(1, tele.get("line_thickness", 2))
 
         # team-coloured halo under EVERY player (club colours), if known
         if team_halos:
@@ -169,13 +254,11 @@ class Composer:
                 if p["id"] == hero_id:
                     continue
                 col = analytics.color_for_track(p["id"], default_color)
-                self._foot_ellipse(frame, p["xyxy"], col,
-                                   max(1, tele.get("line_thickness", 2) - 1),
-                                   grounded=grounded)
+                self._foot_ellipse(canvas, p["xyxy"], col, max(1, thick - 1),
+                                   grounded=grounded, bgra=bgra)
 
-        # hero halo (thicker; team colour if available) + jersey number label.
-        # Use a temporally-smoothed/persistent box so the halo doesn't flicker
-        # when the hero detection drops for a few frames.
+        # hero halo (thicker; team colour if available) + persistent box
+        hero_box = None
         if tele.get("spotlight_scorer", True) and hero_id is not None:
             hero = (_smooth_hero(ft, hero_id, hero_state, tele)
                     if hero_state is not None
@@ -184,23 +267,14 @@ class Composer:
             if hero:
                 col = (analytics.color_for_track(hero_id, default_color)
                        if analytics is not None else default_color)
-                self._foot_ellipse(frame, hero["xyxy"], col,
-                                   tele.get("line_thickness", 2), grounded=grounded)
-                num = (analytics.jerseys.number_of.get(hero_id)
-                       if analytics is not None else None)
-                if num is not None:
-                    x1, y1, x2, y2 = (int(v) for v in hero["xyxy"])
-                    cv2.putText(frame, f"#{num}", (x1, max(12, y1 - 8)),
-                                cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
-                    cv2.putText(frame, f"#{num}", (x1, max(12, y1 - 8)),
-                                cv2.FONT_HERSHEY_DUPLEX, 0.9, col, 2, cv2.LINE_AA)
+                self._foot_ellipse(canvas, hero["xyxy"], col, thick,
+                                   grounded=grounded, bgra=bgra)
+                hero_box = hero["xyxy"]
 
-        # glowing ball trail — a quick neon spark, not a heavy distraction.
-        # Reject teleport segments (spurious ball re-detections across the
-        # pitch) that would otherwise draw long lines "into the sky".
+        # glowing ball trail — reject teleport segments (spurious re-detections)
         if tele.get("ball_trail", True) and getattr(ft, "ball", None):
             bx, by = ft.ball["center"]
-            w_frame = frame.shape[1]
+            w_frame = canvas.shape[1]
             max_jump = float(tele.get("trail_max_jump_frac", 0.18)) * w_frame
             if ball_trail:
                 px, py = ball_trail[-1]
@@ -209,24 +283,27 @@ class Composer:
             ball_trail.append((bx, by))
             if len(ball_trail) > int(tele.get("trail_length", 12)):
                 ball_trail.pop(0)
-            self._draw_trail(frame, ball_trail,
-                             tuple(tele.get("trail_color", [255, 255, 255])))
-        return frame
+            self._draw_trail(canvas, ball_trail,
+                             tuple(tele.get("trail_color", [255, 255, 255])),
+                             bgra=bgra)
+        return hero_box
 
     @staticmethod
-    def _foot_ellipse(frame, xyxy, color, thickness, grounded=True):
+    def _foot_ellipse(frame, xyxy, color, thickness, grounded=True, bgra=False):
         """Thin ring at the player's feet. When `grounded`, only the LOWER arc
         is drawn (0..180deg) so the ring reads as lying on the grass UNDER the
         boots instead of overlapping the legs/body — a seg-mask-free occlusion
         approximation. Full seg-mask under-player compositing (homography.
-        composite_under_players) is the GPU follow-up."""
+        composite_under_players) is enabled via `telestration.occlusion`.
+
+        `bgra`: draw with a 4th (alpha=255) channel for a transparent BGRA layer."""
         import cv2
         x1, y1, x2, y2 = (int(v) for v in xyxy)
         cx, cyb = int((x1 + x2) / 2), int(y2)
         axes = (max(8, int((x2 - x1) * 0.6)), max(4, int((x2 - x1) * 0.22)))
         start, end = (0, 180) if grounded else (0, 360)
-        cv2.ellipse(frame, (cx, cyb), axes, 0, start, end,
-                    tuple(int(c) for c in color), thickness, cv2.LINE_AA)
+        col = (*(int(c) for c in color), 255) if bgra else tuple(int(c) for c in color)
+        cv2.ellipse(frame, (cx, cyb), axes, 0, start, end, col, thickness, cv2.LINE_AA)
 
     def _draw_possession_plate(self, frame, ft, analytics):
         """Compact, semi-transparent 'POSSESSION' plate pinned to the bottom
@@ -259,15 +336,16 @@ class Composer:
                     (255, 255, 255), 1, cv2.LINE_AA)
 
     @staticmethod
-    def _draw_trail(frame, pts, color):
+    def _draw_trail(frame, pts, color, bgra=False):
         import cv2
         n = len(pts)
+        col = (*(int(c) for c in color), 255) if bgra else tuple(int(c) for c in color)
         for i in range(1, n):
             a = i / n
             thick = max(1, int(2 * a + 0.5))    # sleek neon spark, <=2px
             p0 = (int(pts[i - 1][0]), int(pts[i - 1][1]))
             p1 = (int(pts[i][0]), int(pts[i][1]))
-            cv2.line(frame, p0, p1, color, thick, cv2.LINE_AA)
+            cv2.line(frame, p0, p1, col, thick, cv2.LINE_AA)
 
     # ---------------------------------------------------- 2) slow-motion
     def _slowmo_segment(self, clip_path, out_path, trigger, duration):

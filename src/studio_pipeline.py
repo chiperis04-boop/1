@@ -127,7 +127,8 @@ def run_studio(
     try:
         from .modelhub import ensure_models
         emit("models", 1, "ensuring models")
-        ensure_models(cfg, include_pitch=_graphics_on(cfg))
+        ensure_models(cfg, include_pitch=_graphics_on(cfg),
+                      include_seg=cfg.get("telestration", {}).get("occlusion", False))
     except Exception as exc:  # noqa: BLE001
         log.warning(f"[studio] model ensure failed (continuing): {exc}")
 

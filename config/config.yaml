@@ -205,11 +205,13 @@ telestration:
   halo_smooth: 0.5              # EMA factor for the hero halo box (anti-flicker)
   possession_plate: true        # compact semi-transparent POSSESSION plate (bottom)
   # Full seg-mask under-player occlusion (graphics strictly BENEATH players).
-  # Opt-in: needs a YOLO*-seg model (auto-downloaded via modelhub when on). When
-  # off, the grounded lower-arc halo (halo_grounded) is the seg-free approximation.
+  # Opt-in: needs a YOLO*-seg model (auto-downloaded via Ultralytics/modelhub).
+  # When off, the grounded lower-arc halo (halo_grounded) is the seg-free
+  # approximation; if on but the model can't load, we fall back to that arc too.
   occlusion: false              # composite halos/lines UNDER player seg-masks
-  occlusion_model: models/football-player-seg.pt   # YOLO11-seg weights (auto-fetched)
+  occlusion_model: yolo11x-seg.pt  # YOLO11-seg weights (Ultralytics auto-fetch); person/player masks
   occlusion_alpha: 0.85         # graphics-layer blend strength under players
+  occlusion_conf: 0.3           # seg detection confidence
 
 # ---- shot segmentation (broadcast camera cuts) ----
 # The studio plans tracking + crop PER SHOT so the 9:16 camera resets at every
