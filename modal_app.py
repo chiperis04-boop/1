@@ -18,11 +18,22 @@ differs, check https://modal.com/docs.
 """
 from __future__ import annotations
 
+import os
+
 import modal
 
 APP_NAME = "football-highlight-studio"
 REMOTE = "/root/fhs"                       # project root inside the container
 GPU = "A100-80GB"                          # A100-80GB (target) | L40S | A10G | H100
+
+# Serving the Director/Critic VLM (Qwen2.5-VL via vLLM) needs a heavy CUDA-devel
+# image (~GBs) and ~40GB of weights, and it is OPT-IN: the studio reaches it over
+# HTTP via FHS_VLM_URL. Registering its functions unconditionally would force
+# Modal to build that big image on EVERY `modal run`/`modal deploy` (and a broken
+# vLLM build would then block even a plain heuristic render). So we only wire the
+# vLLM image/functions when FHS_ENABLE_VLM is set.
+_ENABLE_VLM = os.environ.get("FHS_ENABLE_VLM", "").strip().lower() not in (
+    "", "0", "false", "no", "off")
 
 app = modal.App(APP_NAME)
 
@@ -108,11 +119,17 @@ vllm_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04",
                               add_python="3.11")
     .apt_install("git")
+    # Install torch (+ build tools) FIRST, then build autoawq with build
+    # ISOLATION DISABLED. autoawq's sdist imports torch in
+    # get_requires_for_build_wheel; under pip's default build isolation that runs
+    # in a fresh env WITHOUT torch -> 'ModuleNotFoundError: No module named torch'
+    # which previously failed the whole image build (and blocked every render).
+    .pip_install("torch==2.5.1", "setuptools", "wheel", "packaging", "ninja")
+    .pip_install("autoawq==0.2.8", extra_options="--no-build-isolation")
     .pip_install(
         "vllm==0.7.3",
         "transformers==4.49.0",
         "accelerate==1.3.0",
-        "autoawq==0.2.8",
         "qwen-vl-utils==0.0.10",
         "huggingface_hub[hf_transfer]>=0.26,<1.0",
     )
@@ -121,13 +138,21 @@ vllm_image = (
           "HF_HUB_ENABLE_HF_TRANSFER": "1",
           "VLLM_DO_NOT_TRACK": "1"})
 )
+# When VLM serving is disabled (the default), bind setup_vlm/vlm to the light
+# base image so Modal never builds the heavy CUDA vLLM image for a plain render
+# or deploy. The real vLLM image above is only used when FHS_ENABLE_VLM is set.
+_VLM_IMAGE = vllm_image if _ENABLE_VLM else image
 
 
-@app.function(image=vllm_image, volumes={f"{REMOTE}/models": models_vol},
+@app.function(image=_VLM_IMAGE, volumes={f"{REMOTE}/models": models_vol},
               secrets=HF_SECRET, timeout=60 * 60)
 def setup_vlm():
     """One-time: download the vision-LLM weights onto the models Volume so the
     always-on server has zero cold-download (~40GB for the 72B AWQ)."""
+    if not _ENABLE_VLM:
+        print("VLM serving disabled — set FHS_ENABLE_VLM=1 before deploying to "
+              "build the vLLM image and cache weights.")
+        return None
     import os
     from huggingface_hub import snapshot_download
     model = os.environ.get("FHS_VLM_MODEL", VLM_MODEL)
@@ -137,7 +162,7 @@ def setup_vlm():
     return path
 
 
-@app.function(image=vllm_image, gpu=GPU, volumes={f"{REMOTE}/models": models_vol},
+@app.function(image=_VLM_IMAGE, gpu=GPU, volumes={f"{REMOTE}/models": models_vol},
               secrets=HF_SECRET, timeout=24 * 60 * 60, scaledown_window=20 * 60,
               max_containers=1)
 @modal.concurrent(max_inputs=16)           # vLLM batches requests internally
@@ -147,9 +172,14 @@ def vlm():
 
     Exposes /v1/chat/completions with image_url content — exactly what
     src/agents/llm_client.VisionLLMClient (backend='openai') speaks. The big 72B
-    cold start is front-loaded here; web()/studio_job hit this warm endpoint."""
+    cold start is front-loaded here; web()/studio_job hit this warm endpoint.
+    Opt-in: only serves when FHS_ENABLE_VLM=1 (else the studio uses the offline
+    heuristic Director / an external FHS_VLM_URL)."""
     import os
     import subprocess
+    if not _ENABLE_VLM:
+        print("VLM serving disabled (FHS_ENABLE_VLM unset); not launching vLLM.")
+        return
     model = os.environ.get("FHS_VLM_MODEL", VLM_MODEL)
     # NOTE: build argv as a LIST (no shlex). Recent vLLM takes
     # --limit-mm-per-prompt as a JSON string (e.g. {"image": 8}) — a single argv
