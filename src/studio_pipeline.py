@@ -305,7 +305,7 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
             moment = _window_to_moment(w)
             branded = str(Path(out_dir) / f"{i:02d}_{w.kind}_branded.mp4")
             final = apply_branding(final, moment, {}, branded, cfg, brand,
-                                   with_intro_outro=True)
+                                   with_intro_outro=True, composer_typography=True)
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[studio] branding skipped for clip {i}: {exc}")
 
