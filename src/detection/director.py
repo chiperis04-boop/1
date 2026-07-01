@@ -112,7 +112,7 @@ def generate_manifest(clip_path: str, window=None, cfg: dict | None = None,
 
     try:
         frames = _sample_frames(clip_path, fps=float(d.get("sample_fps", 1.0)),
-                                max_frames=int(d.get("max_frames", 16)))
+                                max_frames=int(d.get("max_frames", 6)))
         if not frames:
             raise RuntimeError("no frames sampled from clip")
         ctx = _context_hint(window)

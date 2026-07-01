@@ -327,7 +327,8 @@ director:
   model: gemini-1.5-flash       # gemini id, or openai/local model name (e.g. qwen2.5-vl)
   base_url: null                # OpenAI-compatible endpoint (e.g. the vLLM /v1 URL)
   sample_fps: 1.0               # frames/sec fed to the model
-  max_frames: 16
+  max_frames: 6                 # keyframes to the VLM (>=8 full clips can exceed
+                                # the 16k ctx even downscaled -> 400; 6@768px is safe)
   temperature: 0.4
   max_retries: 2                # vision-LLM JSON call retries before fallback
   timeout: 60                   # seconds per vision-LLM call
