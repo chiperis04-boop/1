@@ -81,3 +81,5 @@ websockets>=10.0,<13.0        # gradio_client 1.3.0 cap
 # ---- misc ----
 scipy>=1.11
 pillow>=10.0,<11      # gradio 4.44.1 requires pillow<11.0
+
+openai>=1.30,<2.0
