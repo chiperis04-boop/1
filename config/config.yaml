@@ -258,6 +258,19 @@ edit:
     # ball's per-second travel. The lead is clamped so a noisy detection can't fling it.
     lead_gain: 0.15             # focus lead = lead_gain * ball_velocity (per second)
     lead_max_frac: 0.18         # cap the lead offset at this fraction of frame size
+    # DYNAMIC SUBJECT FOLLOW: the crop target is a blend of the hero player and
+    # the ball whose mix follows the ball's speed. When the ball is FLYING
+    # (a pass/shot) the camera commits to the ball; when the ball is SLOW or
+    # moving WITH a player (a dribble / possession / skill accent) it commits to
+    # the hero. Set follow_dynamic=false for the old static 50/50 blend.
+    follow_dynamic: true
+    focus_ball_weight: 0.5      # static blend weight (used only when follow_dynamic=false)
+    follow_ball_speed_lo_frac: 0.08  # ball speed (frac of frame diagonal / s) below
+                                     # which we treat it as "with a player" -> follow hero
+    follow_ball_speed_hi_frac: 0.35  # ball speed above which it is "flying" -> follow ball
+    follow_ball_weight_lo: 0.30      # ball weight at/below lo speed (favours the hero)
+    follow_ball_weight_hi: 0.92      # ball weight at/above hi speed (favours the ball)
+    follow_weight_smooth: 0.80       # EMA on the follow weight so it eases between subjects
     # Hard limits on how fast the crop window may pan/zoom (anti-jerk), applied
     # after Kalman smoothing. Fractions of frame size PER SECOND.
     max_pan_frac_per_s: 0.6     # max horizontal/vertical crop-centre speed

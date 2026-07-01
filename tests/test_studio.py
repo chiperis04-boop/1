@@ -145,15 +145,24 @@ def test_focus_points_fallback_chain():
         _frame(2, [], ball_xy=(600, 360)),                       # ball only
         _frame(3, []),                                           # nothing -> last
     ]
-    pts = _focus_points(frames, hero_id=1, w=w, h=h)
+    # static blend (follow_dynamic off) -> exact 50/50 hero+ball fusion
+    rf_static = {"reframe": {"follow_dynamic": False}}["reframe"]
+    pts = _focus_points(frames, hero_id=1, w=w, h=h, rf=rf_static)
     assert pts.shape == (4, 2)
     # frame 0: average of hero(100,100) and ball(150,150) -> (125,125)
     assert np.allclose(pts[0], [125, 125]), pts[0]
-    # frame 2: ball only
-    assert np.allclose(pts[2], [600, 360]), pts[2]
-    # frame 3: no detections -> carries last point forward
-    assert np.allclose(pts[3], pts[2]), pts[3]
-    print("  ✓ focus points: hero+ball fusion, ball-only, last-known fallbacks")
+
+    # dynamic blend (default): a slow ball leans the focus toward the hero, so
+    # frame 0 sits between the hero and the static 50/50 midpoint.
+    dyn = _focus_points(frames, hero_id=1, w=w, h=h)
+    assert 100 <= dyn[0][0] < 125, dyn[0]        # biased toward hero(100), not 125
+
+    # fallbacks are independent of the blend mode:
+    for pts in (pts, dyn):
+        assert np.allclose(pts[2], [600, 360]), pts[2]   # ball only
+        assert np.allclose(pts[3], pts[2]), pts[3]       # nothing -> last-known
+    print("  ✓ focus points: static 50/50 + dynamic hero-lean, "
+          "ball-only, last-known fallbacks")
 
 
 def test_geometric_hero_vote():

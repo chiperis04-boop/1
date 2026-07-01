@@ -251,9 +251,6 @@ class Cameraman:
         crop_h = max(1, min(h, int(round(h / base_zoom))))
         crop_w = min(w, int(round(crop_h * aw / ah)))
 
-        # follow a per-frame hero (cross-shot Re-ID) when supplied
-        focus = _focus_points(frames, hero_ids if hero_ids is not None else hero_id,
-                              w, h)
         n = len(frames)
 
         # per-shot smoothing segments (reset the camera at every cut)
@@ -261,6 +258,13 @@ class Cameraman:
         if shots:
             from ..perception.shots import frame_segments
             segments = frame_segments(shots, n)
+
+        # follow a per-frame hero (cross-shot Re-ID) when supplied. The focus is
+        # a DYNAMIC blend of hero + ball: when the ball is flying (a pass/shot)
+        # the camera commits to the ball; when the ball is slow / with a player
+        # (a dribble, possession, or skill accent) it commits to the hero.
+        focus = _focus_points(frames, hero_ids if hero_ids is not None else hero_id,
+                              w, h, rf=rf, fps=fps, segments=segments)
 
         # anticipation: lead the focus point ahead of the ball along its velocity
         # so the camera leads the play instead of chasing it (per-shot, so the
@@ -549,33 +553,129 @@ def _pick_hero(frames: list[FrameTrack]) -> int | None:
     return max(votes, key=votes.get) if votes else None
 
 
-def _focus_points(frames, hero_id, w, h) -> np.ndarray:
-    """Per-frame focus = weighted centre of mass of (hero, ball). Falls back to
-    ball, then all-players centroid, then last-known / frame centre.
+def _focus_points(frames, hero_id, w, h, rf=None, fps=30.0,
+                  segments=None) -> np.ndarray:
+    """Per-frame focus point with DYNAMIC subject following.
+
+    The camera's target is a blend of the hero player and the ball whose mix
+    shifts with the ball's speed:
+
+      * ball FLYING (a pass / shot / long ball) -> the blend commits to the
+        ball, so the camera tracks the ball through the air.
+      * ball SLOW or moving WITH a player (a dribble, possession, a skill
+        accent) -> the blend commits to the hero, so the camera holds the
+        player being featured.
+
+    The ball/hero weight is a smooth function of ball speed (fraction of the
+    frame diagonal per second) between two thresholds, then EMA-smoothed per
+    shot so it eases between "follow ball" and "follow player" instead of
+    snapping. Falls back to ball, then all-players centroid, then last-known /
+    frame centre when a subject is missing.
 
     `hero_id` may be a single track id or a per-frame list/array of ids
-    (cross-shot Re-ID), so the camera can follow the same player across cuts."""
+    (cross-shot Re-ID), so the camera can follow the same player across cuts.
+    """
+    rf = rf or {}
     per_frame = isinstance(hero_id, (list, tuple, np.ndarray))
-    pts = []
-    last = np.array([w / 2.0, h / 2.0])
+    n = len(frames)
+    if n == 0:
+        return np.array([[w / 2, h / 2]], dtype=np.float64)
+
+    # collect hero + ball centres per frame (NaN when absent)
+    hero_pts = np.full((n, 2), np.nan, dtype=np.float64)
+    ball_pts = np.full((n, 2), np.nan, dtype=np.float64)
+    players_centroid = np.full((n, 2), np.nan, dtype=np.float64)
     for i, ft in enumerate(frames):
         hid = (hero_id[i] if per_frame and i < len(hero_id) else
-               (hero_id[-1] if per_frame and hero_id else hero_id))
+               (hero_id[-1] if per_frame and len(hero_id) else hero_id))
         hero = next((p for p in ft.players if p["id"] == hid), None)
-        ball = ft.ball
-        if hero and ball:
-            p = 0.5 * np.array(hero["center"]) + 0.5 * np.array(ball["center"])
-        elif ball:
-            p = np.array(ball["center"])
-        elif hero:
-            p = np.array(hero["center"])
-        elif ft.players:
-            p = np.mean([pl["center"] for pl in ft.players], axis=0)
+        if hero is not None:
+            hero_pts[i] = hero["center"]
+        if ft.ball is not None:
+            ball_pts[i] = ft.ball["center"]
+        if ft.players:
+            players_centroid[i] = np.mean([pl["center"] for pl in ft.players],
+                                          axis=0)
+
+    # dynamic ball weight from ball speed (0 = follow hero, 1 = follow ball)
+    w_ball = _dynamic_ball_weight(ball_pts, w, h, fps, segments, rf)
+
+    pts = np.empty((n, 2), dtype=np.float64)
+    last = np.array([w / 2.0, h / 2.0])
+    for i in range(n):
+        hero = hero_pts[i]
+        ball = ball_pts[i]
+        have_hero = not np.isnan(hero[0])
+        have_ball = not np.isnan(ball[0])
+        if have_hero and have_ball:
+            a = float(w_ball[i])
+            p = a * ball + (1.0 - a) * hero
+        elif have_ball:
+            p = ball
+        elif have_hero:
+            p = hero
+        elif not np.isnan(players_centroid[i][0]):
+            p = players_centroid[i]
         else:
             p = last
         last = p
-        pts.append(p)
-    return np.array(pts, dtype=np.float64) if pts else np.array([[w / 2, h / 2]])
+        pts[i] = p
+    return pts
+
+
+def _dynamic_ball_weight(ball_pts: np.ndarray, w: int, h: int, fps: float,
+                         segments, rf: dict) -> np.ndarray:
+    """Per-frame weight of the BALL vs the HERO in the focus blend, driven by
+    ball speed. Returns an array in [w_lo, w_hi] (higher = follow the ball).
+
+    Speed is |d(ball)/dt| as a fraction of the frame diagonal per second,
+    computed INSIDE each shot (never across a cut), mapped through a smoothstep
+    between `follow_ball_speed_lo_frac` and `follow_ball_speed_hi_frac`, then
+    EMA-smoothed so the follow-target eases. A static 50/50 blend is used when
+    `follow_dynamic` is off (backwards-compatible)."""
+    n = len(ball_pts)
+    static = float(rf.get("focus_ball_weight", 0.5))
+    if not bool(rf.get("follow_dynamic", True)) or n == 0:
+        return np.full(max(n, 1), static)
+
+    lo_frac = float(rf.get("follow_ball_speed_lo_frac", 0.08))
+    hi_frac = float(rf.get("follow_ball_speed_hi_frac", 0.35))
+    w_lo = float(rf.get("follow_ball_weight_lo", 0.30))   # slow ball -> hero
+    w_hi = float(rf.get("follow_ball_weight_hi", 0.92))   # fast ball -> ball
+    ema = float(rf.get("follow_weight_smooth", 0.80))
+
+    # hold last-known ball position across gaps so a brief miss reads as slow
+    filled = ball_pts.copy()
+    last = None
+    for i in range(n):
+        if np.isnan(filled[i][0]):
+            filled[i] = last if last is not None else [w / 2.0, h / 2.0]
+        else:
+            last = filled[i]
+
+    diag = float(np.hypot(w, h)) or 1.0
+    speed = np.zeros(n, dtype=np.float64)
+    segs = segments if segments else [(0, n)]
+    for a, b in segs:
+        a = max(0, min(a, n))
+        b = max(a, min(b, n))
+        if b - a < 2:
+            continue
+        vel = np.gradient(filled[a:b], axis=0) * float(fps)   # px/s
+        speed[a:b] = np.hypot(vel[:, 0], vel[:, 1]) / diag    # frac diag / s
+
+    t = np.clip((speed - lo_frac) / max(1e-6, (hi_frac - lo_frac)), 0.0, 1.0)
+    t = t * t * (3.0 - 2.0 * t)                               # smoothstep
+    wb = w_lo + (w_hi - w_lo) * t
+
+    # EMA-smooth the weight per shot so the follow-target eases between subjects
+    out = wb.copy()
+    for a, b in segs:
+        a = max(0, min(a, n))
+        b = max(a, min(b, n))
+        for i in range(a + 1, b):
+            out[i] = ema * out[i - 1] + (1.0 - ema) * wb[i]
+    return out
 
 
 def _kalman_smooth(xs: np.ndarray, ys: np.ndarray, fps: float, cfg: dict,
