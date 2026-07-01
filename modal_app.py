@@ -79,10 +79,11 @@ VOLUMES = {
 # Optional Hugging Face token (for model downloads). Create it with:
 #   modal secret create huggingface-secret HF_TOKEN=hf_xxx
 # required=False -> deploy/runs still work without it (the model repos are public).
-try:
-    HF_SECRET = [modal.Secret.from_name("huggingface-secret", required=False)]
-except TypeError:                          # older Modal SDK without `required`
-    HF_SECRET = []
+# Named secrets are referenced WITHOUT a `required=` kwarg: this Modal SDK raises
+# TypeError on it, and the old try/except then silently dropped EVERY secret ->
+# NVIDIA_API_KEY / FHS_VLM_URL never reached the containers (the 401s). Use the
+# account's real secret name ('hf-secret', not 'huggingface-secret').
+HF_SECRET = [modal.Secret.from_name("hf-secret")]
 
 
 # --------------------------------------------------------------------------- #
@@ -229,15 +230,13 @@ def _vlm_overrides() -> dict:
 # Secret carrying FHS_VLM_URL (the deployed vLLM endpoint) for worker functions.
 # Create after deploying once you know the /vlm URL:
 #   modal secret create fhs-vlm FHS_VLM_URL=https://<you>--...-vlm.modal.run
-try:
-    VLM_SECRET = HF_SECRET + [
-        modal.Secret.from_name("fhs-vlm", required=False),
-        # NVIDIA NIM key for the AI Director/Critic (llm: section in config).
-        # Injected as NVIDIA_API_KEY env inside the studio containers.
-        modal.Secret.from_name("nvidia-nim", required=False),
-    ]
-except TypeError:
-    VLM_SECRET = HF_SECRET
+VLM_SECRET = HF_SECRET + [
+    modal.Secret.from_name("fhs-vlm"),
+    # NVIDIA NIM key for the AI Director/Critic (config llm: section) — injected
+    # as NVIDIA_API_KEY inside the studio containers. MUST be attached (no
+    # required= kwarg, no swallowing try/except) or the VLM calls 401.
+    modal.Secret.from_name("nvidia-nim"),
+]
 
 
 # --------------------------------------------------------------------------- #
