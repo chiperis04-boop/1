@@ -261,6 +261,7 @@ edit:
     loudness_target_lufs: -14   # social-platform target (TikTok/Reels/Shorts)
     beat_sync: false            # snap slow-mo onset / cut-in to the music beat
     beat_snap_max_shift: 0.12   # max seconds a timestamp may be nudged onto a beat
+    beat_min_beats_per_segment: 4  # compilation: min whole beats each segment lasts
   captions:
     enabled: true
     style: tiktok               # tiktok | clean | broadcast

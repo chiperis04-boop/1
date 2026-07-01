@@ -163,12 +163,13 @@ def venc_args(encoder: str, intermediate: bool = False) -> list[str]:
 
 
 def standardize(src: str, out: str, w: int, h: int, fps: int,
-                encoder: str = "libx264") -> str:
+                encoder: str = "libx264", trim: float | None = None) -> str:
     """Force `src` to exactly 1 video + 1 stereo AAC@48k audio track at WxH/fps.
 
     Pads/letterboxes to preserve aspect, and synthesises a silent audio track
     when the source has none. After this, clips are safe to concatenate.
-    """
+    `trim` (seconds), when given, caps the output duration (used for beat-aligned
+    compilation cut points)."""
     vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
           f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,"
           f"fps={fps},format=yuv420p,setsar=1")
@@ -182,8 +183,10 @@ def standardize(src: str, out: str, w: int, h: int, fps: int,
 
     cmd += ["-vf", vf, "-map", "0:v:0", "-map", amap,
             *venc_args(encoder),
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-            "-shortest", out]
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+    if trim and trim > 0:
+        cmd += ["-t", f"{float(trim):.3f}"]
+    cmd += ["-shortest", out]
     run(cmd, desc=f"standardize {Path(src).name}")
     return out
 
