@@ -106,10 +106,10 @@ def generate_manifest(clip_path: str, window=None, cfg: dict | None = None,
     cfg = cfg or {}
     d = cfg.get("director", {})
     llm = cfg.get("llm", {})
-    # a configured llm: endpoint (NVIDIA NIM) forces the OpenAI-compatible path;
-    # else fall back to the director.backend (heuristic by default).
-    backend = ("openai" if llm.get("base_url")
-               else (d.get("backend") or "heuristic").lower())
+    # respect an explicit Director backend; else default to the OpenAI-compatible
+    # endpoint (NVIDIA NIM) when the llm: section is configured.
+    _b = (d.get("backend") or "").strip().lower()
+    backend = _b or ("openai" if llm.get("base_url") else "heuristic")
 
     if backend in ("none", "off", "disabled"):
         return _heuristic(clip_path, window, track, cfg)

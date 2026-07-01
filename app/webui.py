@@ -477,9 +477,12 @@ def build() -> gr.Blocks:
                         freeze = gr.Checkbox(True, label="Freeze-zoom call-out intro (v1 only)")
                     with gr.Accordion("Studio v2 options", open=True):
                         v2_director = gr.Dropdown(
-                            ["heuristic", "gemini", "openai"], value="heuristic",
-                            label="Director (editing manifest)",
-                            info="heuristic = offline; gemini/openai need an API key env var")
+                            ["openai", "gemini", "heuristic"], value="openai",
+                            label="Director / Critic backend (AI brain)",
+                            info="openai = NVIDIA NIM cloud (default; uses the "
+                                 "NVIDIA_API_KEY env / nvidia-nim secret) — this is "
+                                 "the full API path. heuristic = offline (no AI). "
+                                 "gemini needs GEMINI_API_KEY.")
                         v2_team_halos = gr.Checkbox(
                             True, label="Team-coloured halos (K-means jersey colours)")
                         v2_jerseys = gr.Checkbox(

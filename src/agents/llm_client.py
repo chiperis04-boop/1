@@ -42,9 +42,11 @@ class VisionLLMClient:
                         or (llm.get("api_key") or "").strip()
                         or os.environ.get("OPENAI_API_KEY"))
         self.model = (llm.get("model_name") or d.get("model", "") or "")
-        # a configured llm endpoint forces the OpenAI-compatible transport
-        self.backend = ("openai" if llm.get("base_url")
-                        else (d.get("backend") or "heuristic").lower())
+        # Respect an explicit Director backend (the WebUI dropdown); otherwise
+        # default to the OpenAI-compatible endpoint when the llm: section is
+        # configured (NVIDIA NIM). So 'openai' -> NIM, 'heuristic' -> offline.
+        _b = (d.get("backend") or "").strip().lower()
+        self.backend = _b or ("openai" if llm.get("base_url") else "heuristic")
         self.temperature = float(d.get("temperature", 0.4))
         self.max_retries = int(d.get("max_retries", 2))
         self.timeout = float(d.get("timeout", 60.0))
