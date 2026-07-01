@@ -247,11 +247,24 @@ edit:
   captions:
     enabled: true
     style: tiktok               # tiktok | clean | broadcast
-    font: assets/fonts/Inter-Bold.ttf
-    fontsize: 58
+    font: assets/fonts/Inter-Bold.ttf   # Montserrat/Teko preferred if present (assets/fonts)
+    fontsize: 58                # legacy absolute fallback for burned captions
     safe_y: 0.62                # vertical position as a fraction of height;
                                 # kept above the bottom ~20% platform-UI band
     max_words_per_line: 4
+    # ---- reference-look typography (sizes are fractions of frame height) ----
+    hook_scale: 0.032           # hook text height (~61px @1920) — was hard 0.045 ("too big")
+    plate_scale: 0.020          # stat-plate text height (~38px @1920) — was 0.026
+    max_lines: 2                # word-wrap the hook to at most N lines (never truncate)
+    hook_y_frac: 0.13           # hook vertical anchor (top, reference-like)
+    box_opacity: 0.30           # semi-transparent plate behind text (~30%)
+    strip_emoji: true           # drop glyphs the TTF can't render (no tofu boxes)
+    # broadcast scoreboard/score-bug safe band at the top of the frame; when
+    # avoid_scoreboard is on, the hook is pushed just below it so overlays never
+    # sit on top of the live scoreboard.
+    scoreboard_safe_top_frac: 0.18
+    avoid_scoreboard: false     # true for broadcast footage with a top score bug
+    reaction_only: true         # stat plates only inside reaction/replay windows
 
 render:
   encoder: h264_nvenc           # h264_nvenc | libx264

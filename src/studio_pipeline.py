@@ -247,6 +247,9 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         stage = "render+review"             # render plan -> QA (+critic) -> revise
         stats = _stats_from(analytics)
         tele_on = cfg.get("telestration", {}).get("enabled", True)
+        # reaction/celebration windows (clip seconds) for stat-card gating:
+        # broadcast replay inserts are natural reaction cuts.
+        reaction = [(s.start, s.end) for s in shots if getattr(s, "is_replay", False)]
         counter = {"n": 0}
 
         def render_plan(p) -> str:
@@ -263,7 +266,7 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
                             intermediate=True)
             outp = str(work / f"render_{k}.mp4")
             composer.finish(rf, outp, manifest=p.to_manifest(), stats=stats,
-                            beats=p.slowmo_beats)
+                            beats=p.slowmo_beats, reaction=reaction)
             return outp
 
         final = str(Path(out_dir) / f"{i:02d}_{w.kind}.mp4")

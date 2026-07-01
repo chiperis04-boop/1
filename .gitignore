@@ -23,3 +23,6 @@ assets/branding/*
 # bundled default caption/branding font (OFL-1.1) — required for drawtext
 !assets/fonts/Inter-Bold.ttf
 !assets/fonts/Inter-LICENSE.txt
+!assets/fonts/Montserrat-Bold.ttf
+!assets/fonts/Teko-Bold.ttf
+!assets/fonts/OFL-NOTICE.txt

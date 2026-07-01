@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from ..edit import ff
-from ..utils.io import get_logger
+from ..utils.io import get_logger, resolve_font, sanitize_text
 
 log = get_logger()
 
@@ -59,12 +59,14 @@ class Composer:
         return self.finish(cur, out_path, manifest, stats)
 
     def finish(self, clip_path: str, out_path: str, manifest=None,
-               stats: dict | None = None, beats=None) -> str:
+               stats: dict | None = None, beats=None, reaction=None) -> str:
         """Space-independent passes: audio-safe slow-mo + premium typography.
         Safe to run on an already-reframed (9:16) clip.
 
         `beats` (list of agents.SlowmoBeat) enables MULTI-beat slow-mo from the
-        Director; if omitted, falls back to the single manifest beat."""
+        Director; if omitted, falls back to the single manifest beat.
+        `reaction` is an optional list of (start_s, end_s) windows during which
+        stat cards may be shown (reaction/celebration cuts only)."""
         work = Path(out_path).with_suffix("")
         slowmo_mp4 = f"{work}_slomo.mp4"
         cur = clip_path
@@ -83,7 +85,7 @@ class Composer:
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"[composer] slow-mo skipped: {exc}")
         try:
-            cur = self._typography(cur, out_path, manifest, stats)
+            cur = self._typography(cur, out_path, manifest, stats, reaction)
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[composer] typography fell back to passthrough: {exc}")
             if cur != out_path:
@@ -401,28 +403,42 @@ class Composer:
         return out_path
 
     # ---------------------------------------------------- 3) typography
-    def _typography(self, clip_path, out_path, manifest, stats):
+    def _typography(self, clip_path, out_path, manifest, stats, reaction=None):
         engine = (self.cfg.get("render", {}).get("typography_engine") or "pillow").lower()
         hook = (getattr(manifest, "video_hook_text", "") or "").strip()
+        cap = self.cfg.get("edit", {}).get("captions", {})
+        if cap.get("strip_emoji", True):
+            hook = sanitize_text(hook)
         plates = self._stat_plates(stats)
         if engine == "moviepy":
             return self._typography_moviepy(clip_path, out_path, hook, plates)
-        return self._typography_pillow(clip_path, out_path, hook, plates)
+        return self._typography_pillow(clip_path, out_path, hook, plates, reaction)
 
-    def _typography_pillow(self, clip_path, out_path, hook, plates):
+    def _typography_pillow(self, clip_path, out_path, hook, plates, reaction=None):
         """Premium overlay via Pillow: TTF font, drop shadow, alpha plates.
-        Reliable (no ImageMagick) and the default engine."""
-        import cv2
-        from PIL import Image, ImageDraw, ImageFont
+        Reliable (no ImageMagick) and the default engine.
 
+        Sizes are fractions of frame height (reference look = small, clean).
+        The hook is word-wrapped to `captions.max_lines` and kept out of the
+        broadcast-scoreboard safe band. Stat plates are only drawn inside the
+        `reaction` windows (celebration/replay cuts), never over live play."""
+        import cv2
+        from PIL import Image, ImageDraw
+
+        cap_cfg = self.cfg.get("edit", {}).get("captions", {})
         font_path = self._font_path()
         cap = cv2.VideoCapture(clip_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or self.cfg["render"]["fps"]
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-        hook_font = _load_font(font_path, int(h * 0.045))
-        plate_font = _load_font(font_path, int(h * 0.026))
+        hook_font = _load_font(font_path, max(16, int(h * float(cap_cfg.get("hook_scale", 0.032)))))
+        plate_font = _load_font(font_path, max(14, int(h * float(cap_cfg.get("plate_scale", 0.020)))))
+
+        # reaction windows -> frame ranges for stat-plate gating
+        reaction_only = bool(cap_cfg.get("reaction_only", True))
+        rx_frames = None
+        if reaction_only and plates:
+            rx_frames = [(int(s * fps), int(e * fps)) for s, e in (reaction or [])]
 
         sink = ff.RawFrameSink(out_path, w, h, fps,
                                ff.pick_encoder(self.cfg["render"]["encoder"]),
@@ -437,12 +453,13 @@ class Composer:
             img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).convert("RGBA")
             draw = ImageDraw.Draw(img, "RGBA")
             if hook and idx < hook_frames:
-                _draw_hook(draw, img.size, hook, hook_font)
-            _draw_plates(draw, img.size, plates, plate_font)
+                _draw_hook(draw, img.size, hook, hook_font, cap_cfg)
+            if plates and (rx_frames is None
+                           or any(a <= idx < b for a, b in rx_frames)):
+                _draw_plates(draw, img.size, plates, plate_font, cap_cfg)
             frame = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
             sink.write(frame)
             idx += 1
-            _ = total
         cap.release()
         sink.close()
         log.info(f"[composer] pillow typography -> {Path(out_path).name}")
@@ -498,8 +515,8 @@ class Composer:
 
     def _font_path(self):
         cap = self.cfg.get("edit", {}).get("captions", {})
-        font = self.brand.get("font") or cap.get("font", "assets/fonts/Inter-Bold.ttf")
-        return font if font and Path(font).exists() else None
+        explicit = self.brand.get("font") or cap.get("font")
+        return resolve_font(explicit) or None
 
     def _profile_wh(self):
         p = self.cfg.get("_active_profile", {"width": 1080, "height": 1920})
@@ -566,32 +583,76 @@ def _text_size(draw, text, font):
         return draw.textlength(text, font=font), font.size
 
 
-def _draw_hook(draw, size, text, font):
+def _wrap_lines(draw, text, font, max_w, max_lines):
+    """Greedy word-wrap `text` to fit `max_w` px, at most `max_lines` lines.
+    Never truncates: any overflow stays on the final line."""
+    words = text.split()
+    if not words:
+        return []
+    lines, cur = [], ""
+    for j, wd in enumerate(words):
+        cand = f"{cur} {wd}".strip()
+        w, _ = _text_size(draw, cand, font)
+        if not cur or w <= max_w:
+            cur = cand
+            continue
+        lines.append(cur)
+        if len(lines) == max_lines - 1:
+            cur = " ".join(words[j:])
+            break
+        cur = wd
+    else:
+        if cur:
+            lines.append(cur)
+        return lines
+    lines.append(cur)
+    return lines[:max_lines]
+
+
+def _draw_hook(draw, size, text, font, cfg=None):
+    """Reference-look hook: small, word-wrapped, centred on a semi-transparent
+    plate with a drop shadow, kept out of the top scoreboard safe band."""
+    cfg = cfg or {}
     W, H = size
-    tw, th = _text_size(draw, text, font)
-    x = (W - tw) // 2
-    y = int(H * 0.10)
-    pad = int(th * 0.5)
-    # semi-transparent plate behind the hook
-    draw.rounded_rectangle([x - pad, y - pad, x + tw + pad, y + th + pad],
-                           radius=pad, fill=(0, 0, 0, 140))
-    # drop shadow then text
-    draw.text((x + 3, y + 3), text, font=font, fill=(0, 0, 0, 200))
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+    lines = _wrap_lines(draw, text, font, int(W * 0.86),
+                        int(cfg.get("max_lines", 2))) or [text]
+    box_op = int(max(0.0, min(1.0, float(cfg.get("box_opacity", 0.30)))) * 255)
+
+    y0 = float(cfg.get("hook_y_frac", 0.13))
+    if cfg.get("avoid_scoreboard", False):
+        y0 = max(y0, float(cfg.get("scoreboard_safe_top_frac", 0.18)) + 0.02)
+    _, lh = _text_size(draw, "Ag", font)
+    leading = int(lh * 0.28)
+    block_h = len(lines) * lh + (len(lines) - 1) * leading
+    y = int(H * y0)
+    pad = int(lh * 0.42)
+    widths = [_text_size(draw, ln, font)[0] for ln in lines]
+    bw = max(widths)
+    bx = (W - bw) // 2
+    draw.rounded_rectangle([bx - pad, y - pad, bx + bw + pad, y + block_h + pad],
+                           radius=pad, fill=(0, 0, 0, box_op))
+    cy = y
+    for ln, lw in zip(lines, widths):
+        x = (W - lw) // 2
+        draw.text((x + 2, cy + 2), ln, font=font, fill=(0, 0, 0, 200))
+        draw.text((x, cy), ln, font=font, fill=(255, 255, 255, 255))
+        cy += lh + leading
 
 
-def _draw_plates(draw, size, plates, font):
+def _draw_plates(draw, size, plates, font, cfg=None):
     if not plates:
         return
+    cfg = cfg or {}
     W, H = size
     x = int(W * 0.06)
+    box_op = int(max(0.0, min(1.0, float(cfg.get("box_opacity", 0.30)))) * 255)
     # stat plates sit in the social safe-zone (above the bottom ~20% UI band)
-    y = int(H * 0.58)
+    y = int(H * float(cfg.get("safe_y", 0.58)))
     for label in plates:
         tw, th = _text_size(draw, label, font)
         pad = int(th * 0.45)
         draw.rounded_rectangle([x - pad, y - pad, x + tw + pad, y + th + pad],
-                               radius=int(pad * 0.8), fill=(0, 0, 0, 130))
+                               radius=int(pad * 0.8), fill=(0, 0, 0, box_op))
         draw.text((x + 2, y + 2), label, font=font, fill=(0, 0, 0, 200))
         draw.text((x, y), label, font=font, fill=(0, 220, 255, 255))
         y += th + int(th * 1.1)

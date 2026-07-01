@@ -66,6 +66,62 @@ def load_branding(path: str | Path = "config/branding.yaml") -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# fonts / text
+# --------------------------------------------------------------------------- #
+# Reference-look display families (Montserrat / Teko) are preferred, then the
+# explicitly-configured font, then Inter, then a couple of common system paths.
+# Never raises: returns "" if nothing is found so callers can fall back to a
+# built-in font instead of failing the render.
+_FONT_DIR = Path("assets/fonts")
+_FONT_PREFERENCE = (
+    "Montserrat-Bold.ttf",
+    "Teko-Bold.ttf",
+    "Teko-Medium.ttf",
+)
+_FONT_SYSTEM_FALLBACKS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def resolve_font(explicit: str | None = None) -> str:
+    """Resolve a usable TTF path following the reference typography preference:
+    bundled Montserrat/Teko -> explicit config font -> bundled Inter -> system
+    DejaVu. Returns "" when nothing exists."""
+    candidates: list[Path] = [_FONT_DIR / n for n in _FONT_PREFERENCE]
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(_FONT_DIR / "Inter-Bold.ttf")
+    candidates += [Path(p) for p in _FONT_SYSTEM_FALLBACKS]
+    for c in candidates:
+        try:
+            if c and c.exists():
+                return str(c)
+        except OSError:
+            continue
+    return ""
+
+
+# codepoint ranges our text fonts can't render (would show as .notdef tofu)
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
+    (0x1F1E6, 0x1F1FF), (0xFE00, 0xFE0F), (0x2190, 0x21FF),
+)
+
+
+def sanitize_text(text: str | None) -> str:
+    """Drop emoji/pictographs a text font can't render and collapse whitespace,
+    keeping burned-in hooks/captions clean instead of full of tofu boxes."""
+    if not text:
+        return ""
+    out = [ch for ch in text
+           if not (any(lo <= ord(ch) <= hi for lo, hi in _EMOJI_RANGES)
+                   or ord(ch) == 0x200D)]
+    return " ".join("".join(out).split())
+
+
+# --------------------------------------------------------------------------- #
 # ffprobe
 # --------------------------------------------------------------------------- #
 def ffprobe(path: str | Path) -> dict[str, Any]:
