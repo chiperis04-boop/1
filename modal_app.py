@@ -230,7 +230,12 @@ def _vlm_overrides() -> dict:
 # Create after deploying once you know the /vlm URL:
 #   modal secret create fhs-vlm FHS_VLM_URL=https://<you>--...-vlm.modal.run
 try:
-    VLM_SECRET = HF_SECRET + [modal.Secret.from_name("fhs-vlm", required=False)]
+    VLM_SECRET = HF_SECRET + [
+        modal.Secret.from_name("fhs-vlm", required=False),
+        # NVIDIA NIM key for the AI Director/Critic (llm: section in config).
+        # Injected as NVIDIA_API_KEY env inside the studio containers.
+        modal.Secret.from_name("nvidia-nim", required=False),
+    ]
 except TypeError:
     VLM_SECRET = HF_SECRET
 
