@@ -364,13 +364,20 @@ class Composer:
             return clip_path
 
         v_setpts = 1.0 / factor          # e.g. factor 0.4 -> setpts 2.5*PTS
-        atempo = _atempo_chain(factor)
+        eff = self.cfg.get("edit", {}).get("effects", {})
+        aud_mode = eff.get("slowmo_audio", "muffle")
+        slow_af = _slow_audio_filter(aud_mode, factor)
         has_audio = ff.has_audio(clip_path)
         out_fps = int(self.cfg["render"]["fps"])
-        eff = self.cfg.get("edit", {}).get("effects", {})
         interp = bool(eff.get("slowmo_interpolate", True))
         quality = eff.get("slowmo_interpolation_quality", "mci")
         encoder = ff.pick_encoder(self.cfg["render"]["encoder"])
+        # soft cross-fade the live audio into a muted slow window (avoids a click)
+        _fd = 0.15
+        pre_fade = (f",afade=t=out:st={max(0.0, t0 - _fd):.3f}:d={_fd}"
+                    if aud_mode == "mute" and t0 > _fd else "")
+        post_fade = (f",afade=t=in:st=0:d={_fd}"
+                     if aud_mode == "mute" else "")
 
         def _filtergraph(use_interp: bool) -> str:
             slow = f"setpts={v_setpts:.4f}*(PTS-STARTPTS)"
@@ -385,9 +392,9 @@ class Composer:
             a_filters = []
             if has_audio:
                 a_filters = [
-                    f"[0:a]atrim=0:{t0:.3f},asetpts=PTS-STARTPTS[a0]",
-                    f"[0:a]atrim={t0:.3f}:{t1:.3f},asetpts=PTS-STARTPTS,{atempo}[a1]",
-                    f"[0:a]atrim={t1:.3f},asetpts=PTS-STARTPTS[a2]",
+                    f"[0:a]atrim=0:{t0:.3f},asetpts=PTS-STARTPTS{pre_fade}[a0]",
+                    f"[0:a]atrim={t0:.3f}:{t1:.3f},asetpts=PTS-STARTPTS,{slow_af}[a1]",
+                    f"[0:a]atrim={t1:.3f},asetpts=PTS-STARTPTS{post_fade}[a2]",
                 ]
                 parts = "[v0][a0][v1][a1][v2][a2]"
             concat = (f"{parts}concat=n=3:v=1:a={1 if has_audio else 0}"
@@ -433,6 +440,7 @@ class Composer:
         eff = self.cfg.get("edit", {}).get("effects", {})
         interp = bool(eff.get("slowmo_interpolate", True))
         quality = eff.get("slowmo_interpolation_quality", "mci")
+        aud_mode = eff.get("slowmo_audio", "muffle")
         encoder = ff.pick_encoder(self.cfg["render"]["encoder"])
         n = len(segs)
 
@@ -447,9 +455,17 @@ class Composer:
                         slow += "," + ff.minterpolate_expr(out_fps, quality)
                     v.append(f"[0:v]trim={s:.3f}:{e:.3f},{slow}[v{i}]")
                 if has_audio:
-                    af = (f"[0:a]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS"
-                          + (f",{_atempo_chain(f)}" if f is not None else "")
-                          + f"[a{i}]")
+                    af = f"[0:a]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS"
+                    if f is not None:
+                        af += f",{_slow_audio_filter(aud_mode, f)}"
+                    elif aud_mode == "mute":
+                        # cross-fade the live audio around a muted slow neighbour
+                        seg_dur = e - s
+                        if i + 1 < n and segs[i + 1][2] is not None and seg_dur > 0.15:
+                            af += f",afade=t=out:st={seg_dur - 0.15:.3f}:d=0.15"
+                        if i > 0 and segs[i - 1][2] is not None:
+                            af += ",afade=t=in:st=0:d=0.15"
+                    af += f"[a{i}]"
                     a.append(af)
             if has_audio:
                 join = "".join(f"[v{i}][a{i}]" for i in range(n))
@@ -828,3 +844,28 @@ def _atempo_chain(factor: float) -> str:
         remaining /= 0.5
     chain.append(round(remaining, 4))
     return ",".join(f"atempo={c}" for c in chain)
+
+
+def _slow_audio_filter(mode: str, factor: float) -> str:
+    """Audio treatment for a SLOWED segment.
+
+    A pitch-preserving time-stretch (atempo) alone sounds warbly/robotic at
+    strong slow factors — the classic "slowed-down demon voice" complaint. So:
+
+      * 'muffle' (default) — atempo + band-pass + volume duck: a clean
+        'underwater' slow-mo bed (the crowd rumble stays, the warble is gone)
+        that reads as intentional, then the normal-speed audio snaps back after.
+      * 'mute'   — silence for the slow window (a short cross-fade on the
+        neighbouring normal audio avoids a click).
+      * 'stretch'— legacy full pitch-preserved atempo.
+
+    Every mode keeps the audio segment's duration equal to the slowed video, so
+    audio and video stay in sync through the concat."""
+    tempo = _atempo_chain(factor)
+    m = (mode or "muffle").lower()
+    if m == "stretch":
+        return tempo
+    if m == "mute":
+        return f"{tempo},volume=0"
+    # muffle: keep the exact stretched duration but tame the artefacts
+    return f"{tempo},lowpass=f=650,highpass=f=90,volume=0.55"

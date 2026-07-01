@@ -287,6 +287,13 @@ edit:
     slowmo_interpolate: true          # motion-interpolate the slowed window so
                                       # it glides instead of stepping/juddering
     slowmo_interpolation_quality: mci # mci (motion-compensated) | blend (cheap)
+    # Audio under a slow-mo window. Pitch-preserved time-stretch alone warbles
+    # ("slowed demon voice") at 0.4x, so the default MUFFLES it (band-pass +
+    # duck) for a clean 'underwater' slow bed that snaps back to normal after.
+    #   muffle  = tasteful underwater bed (default)
+    #   mute    = silence during the slow window (soft cross-faded)
+    #   stretch = legacy full pitch-preserved atempo
+    slowmo_audio: muffle
     freeze_zoom: true
     freeze_zoom_scale: 1.4
   audio:
@@ -438,6 +445,28 @@ reid:
   enabled: true
   backend: histogram            # histogram | osnet (osnet needs torchreid)
   min_sim: 0.5                  # min appearance similarity to link a track
+
+
+# ---- premium look-up (src/render/enhance.py): model restoration + grade ----
+# A plain resize does NOT look premium — this reconstructs detail with a model
+# (opt-in, GPU) and always applies a cinematic finishing grade. When the model
+# package/weights are absent it degrades to grade-only (honest, never faked).
+enhance:
+  enabled: false                # master switch (studio runs it only when true)
+  backend: auto                 # auto (model->grade) | realesrgan | grade
+  model: realesr-general-x4v3   # realesr-general-x4v3 | RealESRGAN_x4plus | *anime*
+  scale: 2                      # model upscale factor (frames resized back to source res)
+  tile: 512                     # tile size for limited VRAM (0 = whole frame)
+  face_enhance: false           # GFPGAN face restoration for close-ups (extra model)
+  half: true                    # fp16 inference on GPU
+  grade:                        # always-available ffmpeg cinematic finish
+    enabled: true
+    contrast: 1.06
+    brightness: 0.02
+    saturation: 1.12
+    gamma: 0.98
+    sharpen: 0.8                # contrast-adaptive unsharp amount
+    denoise: true               # light spatial+temporal denoise (hqdn3d)
 
 
 

@@ -352,6 +352,15 @@ def _process(i, w: EventWindow, clip: str, cfg, brand, out_dir, cam: Cameraman,
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[studio] branding skipped for clip {i}: {exc}")
 
+        stage = "enhance"                   # premium look-up: model restore + grade
+        if cfg.get("enhance", {}).get("enabled", False):
+            try:
+                from .render.enhance import Enhancer
+                hq = str(Path(out_dir) / f"{i:02d}_{w.kind}_hq.mp4")
+                final = Enhancer(cfg).enhance(final, hq)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[studio] enhance skipped for clip {i}: {exc}")
+
         _write_caption(final, w, manifest, brand)
         sc.status = "ok"
         sc.path = final
