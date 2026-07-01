@@ -48,6 +48,7 @@ def build_bundle(clip_path: str, cfg: dict | None = None, shots=None,
     """
     cfg = cfg or {}
     d = cfg.get("director", {})
+    llm = cfg.get("llm", {})
     fps, duration = _probe(clip_path)
     shots = shots if shots is not None else segment_shots(clip_path, cfg)
 
@@ -58,9 +59,10 @@ def build_bundle(clip_path: str, cfg: dict | None = None, shots=None,
         except Exception:  # noqa: BLE001
             peak_t = None
 
-    times = _keyframe_times(duration,
-                            max_frames=int(d.get("max_frames", 16)),
-                            peak_t=peak_t)
+    # keyframes fed to the VLM Director — prefer the llm: section (24 by default)
+    # so a reasoning VLM sees smooth motion / ball trajectory / footwork.
+    n_frames = int(llm.get("max_sampled_frames", d.get("max_frames", 24)))
+    times = _keyframe_times(duration, max_frames=n_frames, peak_t=peak_t)
     keyframes = _grab_jpegs(clip_path, times)
 
     summary = _detection_summary(shots, frames, peak_t)

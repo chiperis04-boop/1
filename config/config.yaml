@@ -402,3 +402,21 @@ reid:
   enabled: true
   backend: histogram            # histogram | osnet (osnet needs torchreid)
   min_sim: 0.5                  # min appearance similarity to link a track
+
+
+
+# ---------------------------------------------------------------------------
+# Large multimodal LLM — the AI Director + Critic brain.
+# Points the OpenAI-compatible client at NVIDIA NIM's hosted Cosmos-3 reasoning
+# VLM (structured reasoning over video/images), removing the local vLLM per-request
+# image cap that caused the 400 "prompt + multimodal tokens" errors.
+llm:
+  base_url: "https://integrate.api.nvidia.com/v1"
+  # local NIM docker alternative (self-hosted container):
+  # base_url: "http://localhost:8000/v1"
+  model_name: "nvidia/cosmos3-nano-reasoner"
+  max_sampled_frames: 24         # keyframes/clip fed to the VLM (24 over ~30s)
+  # SECURITY: the real key is read from the NVIDIA_API_KEY env var FIRST; this
+  # config value is a fallback. Do NOT commit a live nvapi- key to a public repo
+  # (it will be scanned + revoked). Set:  export NVIDIA_API_KEY=nvapi-...
+  api_key: ""

@@ -30,10 +30,21 @@ _OPENAI_BACKENDS = {"openai", "vllm", "ollama", "minicpm", "lmstudio", "local"}
 
 class VisionLLMClient:
     def __init__(self, cfg: dict | None = None):
+        cfg = cfg or {}
         d = (cfg or {}).get("director", {})
-        self.backend = (d.get("backend") or "heuristic").lower()
-        self.model = d.get("model", "")
-        self.base_url = d.get("base_url") or os.environ.get("OPENAI_BASE_URL")
+        llm = (cfg or {}).get("llm", {})
+        # The `llm:` config section (NVIDIA NIM / any OpenAI-compatible endpoint)
+        # takes precedence; director.* stays a fallback for older configs.
+        self.base_url = (llm.get("base_url") or d.get("base_url")
+                         or os.environ.get("OPENAI_BASE_URL"))
+        # api key: env FIRST (never hard-depend on a key committed to the repo)
+        self.api_key = (os.environ.get("NVIDIA_API_KEY")
+                        or (llm.get("api_key") or "").strip()
+                        or os.environ.get("OPENAI_API_KEY"))
+        self.model = (llm.get("model_name") or d.get("model", "") or "")
+        # a configured llm endpoint forces the OpenAI-compatible transport
+        self.backend = ("openai" if llm.get("base_url")
+                        else (d.get("backend") or "heuristic").lower())
         self.temperature = float(d.get("temperature", 0.4))
         self.max_retries = int(d.get("max_retries", 2))
         self.timeout = float(d.get("timeout", 60.0))
@@ -76,7 +87,7 @@ class VisionLLMClient:
     def _complete_openai(self, system: str, text: str, images: list[bytes]) -> str:
         from openai import OpenAI
         client = OpenAI(base_url=self.base_url,
-                        api_key=os.environ.get("OPENAI_API_KEY", "not-needed-local"),
+                        api_key=self.api_key or "not-needed-local",
                         timeout=self.timeout)
         content: list[dict] = [{"type": "text", "text": text}]
         for fb in images:

@@ -105,21 +105,28 @@ def generate_manifest(clip_path: str, window=None, cfg: dict | None = None,
     """
     cfg = cfg or {}
     d = cfg.get("director", {})
-    backend = (d.get("backend") or "heuristic").lower()
+    llm = cfg.get("llm", {})
+    # a configured llm: endpoint (NVIDIA NIM) forces the OpenAI-compatible path;
+    # else fall back to the director.backend (heuristic by default).
+    backend = ("openai" if llm.get("base_url")
+               else (d.get("backend") or "heuristic").lower())
 
     if backend in ("none", "off", "disabled"):
         return _heuristic(clip_path, window, track, cfg)
 
+    # frames/clip fed to the VLM — read from the llm section (24 by default) so a
+    # reasoning VLM (Cosmos) can see smooth motion / ball trajectory / footwork.
+    max_frames = int(llm.get("max_sampled_frames", d.get("max_frames", 24)))
     try:
         frames = _sample_frames(clip_path, fps=float(d.get("sample_fps", 1.0)),
-                                max_frames=int(d.get("max_frames", 6)))
+                                max_frames=max_frames)
         if not frames:
             raise RuntimeError("no frames sampled from clip")
         ctx = _context_hint(window)
         if backend == "gemini":
             raw = _call_gemini(frames, ctx, d)
         elif backend in ("openai", "minicpm", "ollama", "vllm"):
-            raw = _call_openai(frames, ctx, d)
+            raw = _call_openai(frames, ctx, d, llm)
         else:
             raise NotImplementedError(f"director backend '{backend}'")
         m = EditingManifest.coerce(raw, source=backend)
@@ -158,23 +165,28 @@ def _call_gemini(frames: list[bytes], ctx: str, d: dict) -> dict:
     return _parse_json(resp.text)
 
 
-def _call_openai(frames: list[bytes], ctx: str, d: dict) -> dict:
-    """OpenAI-compatible chat/vision call. Works against api.openai.com or any
-    local server that speaks the same API (Ollama, vLLM, LM Studio serving
-    MiniCPM-V-2_6)."""
+def _call_openai(frames: list[bytes], ctx: str, d: dict, llm: dict | None = None) -> dict:
+    """OpenAI-compatible chat/vision call. Works against NVIDIA NIM
+    (integrate.api.nvidia.com), api.openai.com, or any local server speaking the
+    same API (Ollama, vLLM, LM Studio). Endpoint/key/model come from the `llm:`
+    config section (NVIDIA_API_KEY env takes precedence over the config value)."""
     from openai import OpenAI
 
-    client = OpenAI(
-        base_url=d.get("base_url") or os.environ.get("OPENAI_BASE_URL"),
-        api_key=os.environ.get("OPENAI_API_KEY", "not-needed-for-local"),
-    )
+    llm = llm or {}
+    base_url = (llm.get("base_url") or d.get("base_url")
+                or os.environ.get("OPENAI_BASE_URL"))
+    api_key = (os.environ.get("NVIDIA_API_KEY")
+               or (llm.get("api_key") or "").strip()
+               or os.environ.get("OPENAI_API_KEY") or "not-needed-for-local")
+    model = llm.get("model_name") or d.get("model", "minicpm-v")
+    client = OpenAI(base_url=base_url, api_key=api_key)
     content = [{"type": "text", "text": ctx}]
     for fb in frames:
         b64 = base64.b64encode(fb).decode("ascii")
         content.append({"type": "image_url",
                          "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
     resp = client.chat.completions.create(
-        model=d.get("model", "minicpm-v"),
+        model=model,
         messages=[{"role": "system", "content": _SYSTEM_PROMPT},
                   {"role": "user", "content": content}],
         response_format={"type": "json_object"},
