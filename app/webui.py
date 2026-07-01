@@ -122,14 +122,100 @@ def _input_files() -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
+# detached server jobs (reliable: survive a closed browser / dropped session)
+# --------------------------------------------------------------------------- #
+# On Modal, modal_app.web() injects a launcher that .spawn()s the studio_job
+# function in its OWN container. The heavy render then runs to completion
+# independent of the WebUI request, and the page just polls _status.json.
+_JOB_LAUNCHER = None
+
+
+def set_job_launcher(fn) -> None:
+    """Wire a detached-job launcher: fn(match_name, profile, limit, options)."""
+    global _JOB_LAUNCHER
+    _JOB_LAUNCHER = fn
+
+
+def _reload_output_volume() -> None:
+    try:
+        import modal
+        modal.Volume.from_name("fhs-output").reload()
+    except Exception:
+        pass
+
+
+def _read_status(match_name: str) -> dict:
+    if not match_name:
+        return {}
+    _reload_output_volume()
+    f = OUTPUT_DIR / match_name / "_status.json"
+    if not f.exists():
+        return {}
+    try:
+        import json
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def job_status(match_name: str):
+    """Poll a detached server job's status + surface any finished clips.
+
+    A plain request/response (no streaming), so it is robust to the browser
+    disconnecting — the job keeps running on the server regardless."""
+    st = _read_status(match_name)
+    clips = _clips_for(match_name)
+    first = clips[0] if clips else None
+    lines: list[str] = []
+    if st:
+        if st.get("done"):
+            lines.append(f"✅ Статус: {st.get('status', '?')} — обработка завершена.")
+        else:
+            lines.append(f"⏳ {float(st.get('pct', 0)):.0f}% — "
+                         f"{st.get('stage', '')}: {st.get('msg', '')}")
+        for c in st.get("clips", []):
+            mark = "✓" if c.get("status") == "ok" else (
+                "—" if c.get("status") == "skipped" else "✗")
+            lines.append(f"   {mark} {c.get('kind')}: {c.get('status')}")
+        if st.get("error"):
+            lines.append(f"❌ {st['error']}")
+    elif clips:
+        lines.append(f"{len(clips)} клип(ов) найдено в результатах.")
+    else:
+        lines.append("Пока нет данных — задача ещё идёт или не запускалась. "
+                     "Подождите и нажмите ещё раз.")
+    return ("\n".join(lines), gr.update(choices=clips, value=first), first,
+            _caption_for(first) if first else "", _all_outputs(match_name))
+
+
+def auto_poll(enabled: bool, match_name: str):
+    """Timer-driven status poll. No-op (returns gr.update()) unless the 'auto'
+    box is on AND a job match is set — so it never clobbers the v1 live log."""
+    if not enabled or not match_name:
+        return (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+    return job_status(match_name)
+
+
+# --------------------------------------------------------------------------- #
 # create / render
 # --------------------------------------------------------------------------- #
 def render_job(video_path, server_pick, profile, output_mode, target_seconds,
                use_vision, slowmo, freeze, telestration, limit, zscore,
-               min_conf, music_vol):
-    """Generator: streams a log, then yields final preview state."""
-    empty = (gr.update(), gr.update(), gr.update(), gr.update())
-    # a browser upload takes priority; otherwise use a file already on the server
+               min_conf, music_vol, engine, v2_director, v2_team_halos,
+               v2_jerseys, v2_pitch, v2_occlusion, event_source, feed_text,
+               feed_file, espn_fixture, espn_slug, ko1, ko2):
+    """Generator: streams a log, then yields final preview state.
+
+    Supports two engines:
+      * "Classic (v1)" — src.runner.run_pipeline (audio/scene fusion pipeline)
+      * "Studio (v2)"  — src.studio_pipeline.run_studio (Scout -> Director ->
+                          Cameraman BoT-SORT+CMC -> teams/jersey/possession
+                          analytics -> Composer). The moment source is, in
+                          priority order: an uploaded StatsBomb/SoccerNet JSON,
+                          a pasted descriptive match log, an ESPN fixture, or the
+                          detectors — with per-half kick-off offsets.
+    """
+    empty = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
     chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
     if not chosen:
         yield ("⚠️ Upload a match video, or pick one already on the server "
@@ -141,57 +227,124 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
     if src.resolve() != dst.resolve():
         shutil.copy(src, dst)
     match_name = dst.stem
+    is_v2 = str(engine).lower().startswith("studio")
 
-    tgt = float(target_seconds)
-    overrides = {
-        "vision": {"enabled": bool(use_vision)},
-        "telestration": {"enabled": bool(telestration)},
-        "edit": {
-            "effects": {"slowmo_on_key": bool(slowmo), "freeze_zoom": bool(freeze)},
-            "audio": {"music_volume": float(music_vol)},
-        },
-        "detect": {"audio": {"zscore_threshold": float(zscore)}},
-        "fusion": {"min_confidence": float(min_conf)},
-        "render": {
-            "output_mode": output_mode,
-            "compilation": {
-                "target_seconds": tgt,
-                "min_seconds": max(10.0, tgt - 12),
-                "max_seconds": tgt + 12,
+    if is_v2:
+        overrides = {
+            "vision": {
+                "enabled": bool(use_vision),
+                "jerseys": {"enabled": bool(v2_jerseys)},
+                "pitch": {"enabled": bool(v2_pitch)},
             },
-        },
-    }
+            "graphics": {"enabled": bool(v2_pitch)},
+            "telestration": {"enabled": bool(telestration),
+                             "team_halos": bool(v2_team_halos),
+                             "occlusion": bool(v2_occlusion)},
+            "edit": {"effects": {"slowmo_on_key": bool(slowmo)},
+                     "audio": {"music_volume": float(music_vol)}},
+            "director": {"backend": str(v2_director)},
+            "render": {"output_mode": output_mode},
+        }
+        # moment source (uploaded JSON / pasted log / ESPN fixture) + kick-offs
+        ef = _event_feed_overrides(event_source, feed_text, feed_file,
+                                   espn_fixture, espn_slug, ko1, ko2, match_name)
+        if ef:
+            overrides["detect"] = {"event_feed": ef}
+        # compilation reel target (also turns on beat-synced cut points)
+        if output_mode == "compilation":
+            tgt = float(target_seconds)
+            overrides["render"]["compilation"] = {
+                "target_seconds": tgt, "min_seconds": max(10.0, tgt - 12),
+                "max_seconds": tgt + 12}
+            overrides["edit"]["audio"]["beat_sync"] = True
+        # Reliable path on Modal: run the studio in its OWN detached container so
+        # closing the browser / a dropped session never kills the render.
+        if _JOB_LAUNCHER is not None:
+            try:
+                _JOB_LAUNCHER(dst.name, profile, int(limit), overrides)
+                yield (f"▶ Серверная задача запущена для «{match_name}».\n"
+                       "Она НЕ упадёт при закрытии вкладки или обрыве связи.\n"
+                       "Нажимайте «↻ Статус / результаты» ниже, чтобы видеть "
+                       "прогресс и забрать готовые ролики.",
+                       gr.update(), gr.update(), gr.update(), gr.update(),
+                       match_name)
+            except Exception as exc:  # noqa: BLE001
+                yield (f"❌ Не удалось запустить серверную задачу: {exc}", *empty)
+            return
 
     q: queue.Queue = queue.Queue()
     holder: dict = {}
 
-    def cb(p):
-        q.put(("p", p))
+    if is_v2:
 
-    def worker():
-        try:
-            holder["result"] = run_pipeline(
-                str(dst), profile=profile, limit=int(limit),
-                on_progress=cb, overrides=overrides)
-        except Exception as exc:  # noqa: BLE001
-            holder["error"] = str(exc)
-        finally:
-            q.put(("done", None))
+        def cb(stage, pct, msg=""):
+            q.put(("pv2", (stage, pct, msg)))
+
+        def worker():
+            try:
+                from src.studio_pipeline import run_studio
+                holder["result"] = run_studio(
+                    str(dst), profile=profile, limit=int(limit),
+                    on_progress=cb, overrides=overrides)
+            except Exception as exc:  # noqa: BLE001
+                holder["error"] = str(exc)
+            finally:
+                q.put(("done", None))
+    else:
+        tgt = float(target_seconds)
+        overrides = {
+            "vision": {"enabled": bool(use_vision)},
+            "telestration": {"enabled": bool(telestration)},
+            "edit": {
+                "effects": {"slowmo_on_key": bool(slowmo), "freeze_zoom": bool(freeze)},
+                "audio": {"music_volume": float(music_vol)},
+            },
+            "detect": {"audio": {"zscore_threshold": float(zscore)}},
+            "fusion": {"min_confidence": float(min_conf)},
+            "render": {
+                "output_mode": output_mode,
+                "compilation": {
+                    "target_seconds": tgt,
+                    "min_seconds": max(10.0, tgt - 12),
+                    "max_seconds": tgt + 12,
+                },
+            },
+        }
+
+        def cb(p):
+            q.put(("p", p))
+
+        def worker():
+            try:
+                holder["result"] = run_pipeline(
+                    str(dst), profile=profile, limit=int(limit),
+                    on_progress=cb, overrides=overrides)
+            except Exception as exc:  # noqa: BLE001
+                holder["error"] = str(exc)
+            finally:
+                q.put(("done", None))
 
     threading.Thread(target=worker, daemon=True).start()
 
-    log: list[str] = [f"▶ Starting: {match_name}  (profile={profile})"]
-    yield "\n".join(log), *empty
+    engine_label = "Studio v2" if is_v2 else "Classic v1"
+    log: list[str] = [f"▶ Starting: {match_name}  (engine={engine_label}, "
+                      f"profile={profile})"]
+    yield "\n".join(log), gr.update(), gr.update(), gr.update(), gr.update(), match_name
 
     while True:
         kind, payload = q.get()
-        if kind == "p":
+        if kind == "p":                       # v1 Progress object
             bar = "█" * int(payload.percent / 5)
             extra = ""
             if payload.clip_index:
                 extra = f"  [clip {payload.clip_index}/{payload.clip_total}]"
             log.append(f"{payload.percent:5.1f}% |{bar:<20}| "
                        f"{payload.stage}: {payload.message}{extra}")
+            yield "\n".join(log[-30:]), *empty
+        elif kind == "pv2":                   # v2 (stage, pct, msg)
+            stage, pct, msg = payload
+            bar = "█" * int(pct / 5)
+            log.append(f"{pct:5.1f}% |{bar:<20}| {stage}: {msg}")
             yield "\n".join(log[-30:]), *empty
         else:
             break
@@ -204,8 +357,19 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
     result = holder["result"]
     ok = [c for c in result.clips if c.status == "ok"]
     failed = [c for c in result.clips if c.status == "failed"]
-    log.append(f"✅ Done — {len(ok)} clip(s) rendered, {len(failed)} failed, "
-               f"{result.goals} goal(s) of {result.moments} moment(s).")
+    if is_v2:
+        log.append(f"✅ Done — {len(ok)} clip(s) rendered, {len(failed)} failed, "
+                   f"{result.goals} goal(s) of {result.windows} event(s).")
+        for c in ok:
+            hook = (c.manifest or {}).get("video_hook_text", "")
+            hero = f"#{c.hero_number}" if c.hero_number is not None else "?"
+            poss = ("/".join(f"{v}%" for v in c.possession_pct.values())
+                    if c.possession_pct else "n/a")
+            log.append(f"   • {c.kind}: hero {hero} ({c.hero_source}), "
+                       f"possession {poss} — “{hook}”")
+    else:
+        log.append(f"✅ Done — {len(ok)} clip(s) rendered, {len(failed)} failed, "
+                   f"{result.goals} goal(s) of {result.moments} moment(s).")
     for c in failed:
         log.append(f"   • clip {c.index} failed at {c.stage_failed}: {c.error}")
 
@@ -217,6 +381,7 @@ def render_job(video_path, server_pick, profile, output_mode, target_seconds,
         first,                                       # video preview
         _caption_for(first) if first else "",        # caption box
         _all_outputs(match_name),                    # downloadable files
+        match_name,                                  # status_match field
     )
 
 
@@ -224,6 +389,31 @@ def on_pick_clip(clip_path):
     if not clip_path:
         return None, ""
     return clip_path, _caption_for(clip_path)
+
+
+# --------------------------------------------------------------------------- #
+# event-feed source + dry-run moment preview (v2) — pure logic in
+# src.detection.preview (gradio-free, unit-tested); these are thin wrappers.
+# --------------------------------------------------------------------------- #
+def _event_feed_overrides(event_source, feed_text, feed_file, espn_fixture,
+                          espn_slug, ko1, ko2, match_name):
+    from src.detection.preview import event_feed_overrides
+    return event_feed_overrides(event_source, feed_text, feed_file, espn_fixture,
+                                espn_slug, ko1, ko2, match_name,
+                                feed_dir=str(INPUT_DIR))
+
+
+def preview_windows(video_path, server_pick, event_source, feed_text, feed_file,
+                    espn_fixture, espn_slug, ko1, ko2, limit):
+    """DRY-RUN: parse the manual match log (or run the Scout) and return a
+    scannable MARKDOWN table of the moments that WOULD be clipped — BEFORE any
+    render — so the operator can validate the selection. Returns (log, markdown).
+    """
+    from src.detection.preview import preview_markdown
+    chosen = video_path or (str(INPUT_DIR / server_pick) if server_pick else "")
+    return preview_markdown(chosen or None, event_source, feed_text, feed_file,
+                            espn_fixture, espn_slug, ko1, ko2, limit,
+                            feed_dir=str(INPUT_DIR))
 
 
 # --------------------------------------------------------------------------- #
@@ -267,6 +457,11 @@ def build() -> gr.Blocks:
                         refresh_inputs = gr.Button("↻", scale=1)
                     profile = gr.Dropdown(_profiles(), value="tiktok",
                                           label="Output profile")
+                    engine = gr.Radio(
+                        ["Classic (v1)", "Studio (v2)"], value="Studio (v2)",
+                        label="Engine",
+                        info="Studio v2 = BoT-SORT+CMC reframe, team colours, "
+                             "possession, jersey-number hero lock, LLM director")
                     output_mode = gr.Radio(
                         ["per_clip", "compilation"], value="per_clip",
                         label="Output",
@@ -279,7 +474,51 @@ def build() -> gr.Blocks:
                         use_vision = gr.Checkbox(True, label="GPU telestration + action-aware reframe")
                         telestration = gr.Checkbox(True, label="Draw arrows / spotlight / ball trail")
                         slowmo = gr.Checkbox(True, label="Slow-mo on the key beat")
-                        freeze = gr.Checkbox(True, label="Freeze-zoom call-out intro")
+                        freeze = gr.Checkbox(True, label="Freeze-zoom call-out intro (v1 only)")
+                    with gr.Accordion("Studio v2 options", open=True):
+                        v2_director = gr.Dropdown(
+                            ["openai", "gemini", "heuristic"], value="openai",
+                            label="Director / Critic backend (AI brain)",
+                            info="openai = NVIDIA NIM cloud (default; uses the "
+                                 "NVIDIA_API_KEY env / nvidia-nim secret) — this is "
+                                 "the full API path. heuristic = offline (no AI). "
+                                 "gemini needs GEMINI_API_KEY.")
+                        v2_team_halos = gr.Checkbox(
+                            True, label="Team-coloured halos (K-means jersey colours)")
+                        v2_jerseys = gr.Checkbox(
+                            True, label="Jersey-number recognition + hero lock by number")
+                        v2_pitch = gr.Checkbox(
+                            False, label="Pitch homography (grass-anchored graphics + metric possession)")
+                        v2_occlusion = gr.Checkbox(
+                            False, label="Seg-mask occlusion (graphics UNDER players — needs seg model, GPU)")
+                    with gr.Accordion("Источник моментов (v2) + dry-run", open=True):
+                        event_source = gr.Radio(
+                            ["Детекторы (авто)", "Текст/CSV отчёт", "ESPN (fixture)"],
+                            value="Текст/CSV отчёт", label="Откуда брать моменты",
+                            info="Вставьте свой лог/JSON ниже (приоритетно и "
+                                 "надёжнее автопоиска). Укажите kick-off (сек "
+                                 "видео), чтобы привязать минуту матча к таймкоду.")
+                        feed_text = gr.Textbox(
+                            lines=10, label="Paste Descriptive Match Log / Captions",
+                            placeholder="67' GOAL — Messi (Argentina)\n"
+                                        "73' yellow card, Rodri (Spain)\n"
+                                        "или CSV: minute,team,player,type\n"
+                                        "или вставьте StatsBomb/SoccerNet JSON")
+                        feed_file = gr.File(
+                            label="Or Upload StatsBomb/SoccerNet JSON",
+                            file_types=[".json"], type="filepath")
+                        with gr.Row():
+                            espn_fixture = gr.Textbox(label="ESPN fixture_id (optional)",
+                                                      scale=2)
+                            espn_slug = gr.Textbox(value="esp.1", label="ESPN slug",
+                                                   scale=1)
+                        with gr.Row():
+                            ko1 = gr.Number(value=0, label="Kick-off 1-й тайм (сек)")
+                            ko2 = gr.Number(value=0, label="Kick-off 2-й тайм (сек)")
+                        preview_btn = gr.Button("👁 Показать выбранные моменты (dry-run)")
+                        preview_md = gr.Markdown(
+                            "_Вставьте лог/JSON и нажмите dry-run, чтобы увидеть "
+                            "отобранные моменты ДО рендера._")
                     with gr.Accordion("Detection tuning", open=False):
                         limit = gr.Slider(0, 30, value=0, step=1,
                                           label="Max clips (0 = all)")
@@ -297,14 +536,40 @@ def build() -> gr.Blocks:
                     preview = gr.Video(label="Preview")
                     caption = gr.Textbox(label="Caption / hashtags", lines=4)
                     files = gr.Files(label="Download")
+                    status_match = gr.Textbox(
+                        label="Матч задачи (серверный режим)",
+                        info="Заполняется при запуске. Жмите «Статус / "
+                             "результаты», чтобы видеть прогресс и забрать "
+                             "ролики — даже если закрывали вкладку.")
+                    with gr.Row():
+                        status_btn = gr.Button("↻ Статус / результаты")
+                        auto = gr.Checkbox(False, label="Авто (каждые 5с)")
+                    timer = gr.Timer(5.0)
 
             run_btn.click(
                 render_job,
                 inputs=[video, server_pick, profile, output_mode, target_seconds,
                         use_vision, slowmo, freeze, telestration,
-                        limit, zscore, min_conf, music_vol],
-                outputs=[logbox, clip_dd, preview, caption, files],
+                        limit, zscore, min_conf, music_vol,
+                        engine, v2_director, v2_team_halos, v2_jerseys, v2_pitch,
+                        v2_occlusion, event_source, feed_text, feed_file,
+                        espn_fixture, espn_slug, ko1, ko2],
+                outputs=[logbox, clip_dd, preview, caption, files, status_match],
             )
+            preview_btn.click(
+                preview_windows,
+                inputs=[video, server_pick, event_source, feed_text, feed_file,
+                        espn_fixture, espn_slug, ko1, ko2, limit],
+                outputs=[logbox, preview_md])
+            status_btn.click(
+                job_status, inputs=status_match,
+                outputs=[logbox, clip_dd, preview, caption, files])
+            # opt-in auto-refresh: the timer ticks always, but only polls when the
+            # 'auto' box is checked AND a job match is set (no effect otherwise, so
+            # it never clobbers the v1 live-streaming log).
+            timer.tick(
+                auto_poll, inputs=[auto, status_match],
+                outputs=[logbox, clip_dd, preview, caption, files])
             refresh_inputs.click(lambda: gr.update(choices=_input_files()),
                                  outputs=server_pick)
             clip_dd.change(on_pick_clip, inputs=clip_dd, outputs=[preview, caption])

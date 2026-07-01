@@ -45,10 +45,13 @@ def reframe_clip(clip_path: str, track: TrackResult, out_path: str, cfg: dict) -
 
     cap = cv2.VideoCapture(clip_path)
     fps = track.fps
-    tmp = out_path.replace(".mp4", "_silent.mp4")
     out_w = cfg_profile_w(cfg)
     out_h = cfg_profile_h(cfg)
-    writer = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (out_w, out_h))
+    encoder = ff.pick_encoder(cfg["render"]["encoder"])
+    # crop (~607px wide for 9:16 from 1080p) is upscaled to the profile width,
+    # so use a high-quality interpolation instead of INTER_AREA (down-only).
+    sink = ff.RawFrameSink(out_path, out_w, out_h, fps, encoder,
+                           audio_src=clip_path)
 
     idx = 0
     while True:
@@ -57,15 +60,14 @@ def reframe_clip(clip_path: str, track: TrackResult, out_path: str, cfg: dict) -
             break
         c = cx[min(idx, len(cx) - 1)]
         x0 = int(round(c - half))
+        x0 = max(0, min(x0, src_w - crop_w))
         crop = frame[0:crop_h, x0:x0 + crop_w]
-        crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_AREA)
-        writer.write(crop)
+        crop = cv2.resize(crop, (out_w, out_h), interpolation=cv2.INTER_LANCZOS4)
+        sink.write(crop)
         idx += 1
 
     cap.release()
-    writer.release()
-    encoder = ff.pick_encoder(cfg["render"]["encoder"])
-    ff.mux_audio(tmp, clip_path, out_path, encoder)
+    sink.close()
     log.info(f"[reframe] {r['target_aspect']} action-track -> {out_path}")
     return out_path
 
@@ -85,7 +87,20 @@ def _focus_track(track: TrackResult, src_w: float):
 
 
 def _smooth(x: np.ndarray, alpha: float) -> np.ndarray:
-    out = np.empty_like(x)
+    """Zero-phase camera smoothing (forward + backward EMA).
+
+    A plain causal EMA lags behind the action, so the crop trails the ball on
+    fast plays. Because the whole clip is known up-front we can filter forwards
+    AND backwards and average the two — this removes the phase lag, so the
+    virtual camera anticipates motion instead of chasing it.
+    """
+    fwd = _ema_pass(x, alpha)
+    bwd = _ema_pass(x[::-1], alpha)[::-1]
+    return 0.5 * (fwd + bwd)
+
+
+def _ema_pass(x: np.ndarray, alpha: float) -> np.ndarray:
+    out = np.empty_like(x, dtype=np.float64)
     out[0] = x[0]
     for i in range(1, len(x)):
         out[i] = alpha * out[i - 1] + (1 - alpha) * x[i]

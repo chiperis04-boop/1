@@ -69,6 +69,56 @@ detect:
     min_conf: 0.5
     labels_map: {}               # extra {model_label: our_kind} overrides
 
+  # ---- scout: how event windows are built + score-verified (v2 pipeline) ----
+  scout:
+    goal_pre_seconds: 20.0        # blueprint: -20s before a goal anchor
+    goal_post_seconds: 10.0       # blueprint: +10s after
+    pre_seconds: 7.0
+    post_seconds: 5.0
+    verify_radius_seconds: 25.0   # OCR score-change must land within this of an anchor
+    verified_goal_boost: 0.25     # confidence bump when a goal is score-verified
+    merge_gap_seconds: 15.0       # collapse anchors closer than this
+
+  # ---- event feed: drive clipping from a detailed textual match report ----
+  # The most reliable + cheapest moment source (ClipMaker-style). Supply a
+  # play-by-play (CSV/JSON/text) and the per-period kick-off offsets that map the
+  # match clock to this video file, and the Scout places precise event windows.
+  # COMPLIANCE: prefer public-domain (openfootball) / licensed feeds; scraping
+  # some sites breaches their ToS — sourcing rights are the operator's job.
+  event_feed:
+    enabled: false                # set true + give a source to use the feed
+    source: null                  # path to .csv/.json/.txt (or wired from the WebUI)
+    # video-time (seconds) of each period's kick-off in THIS file. Mark these
+    # once per match (e.g. 2nd half kicks off at 45:40 -> 2740).
+    kickoffs: {}                  # e.g. {1: 0, 2: 2740}
+    min_importance: 0.0           # drop feed events below this xT/importance
+    # dynamic clip sizing: a high-energy description ("outrageous solo run 🔥")
+    # extends the window by up to energy*boost seconds (buildup / celebration).
+    energy_pre_boost: 4.0         # extra pre-roll seconds at energy=1.0
+    energy_post_boost: 3.0        # extra post-roll seconds at energy=1.0
+    align_to_ocr: true            # snap goal windows to the scoreboard OCR clock
+    ocr_align_radius_seconds: 40.0
+    top_n: 0                      # keep only the N strongest moments (0 = all)
+    # ESPN public (keyless) source — goals/cards+minutes for current seasons.
+    # Compliance-clean (open API, not a scrape). slug: esp.1=La Liga,
+    # fifa.world=World Cup. fixture_id = ESPN event id for the match.
+    espn:
+      enabled: false
+      slug: esp.1
+      fixture_id: null
+
+  # ---- reel survey (v2): VLM understands a WHOLE highlights reel + picks the
+  #      real highlight moments on scene-cut boundaries. Primary moment source
+  #      for the 'detectors (auto)' path when a vision-LLM (llm: section) is
+  #      configured; drops midfield passes / replays / celebration. Falls back to
+  #      detector discovery if no VLM. Ideal for 15-20 min pre-made reels.
+  reel_survey:
+    enabled: true
+    moment_min_seconds: 6.0       # merge scene cuts into moments at least this long
+    max_moments: 40               # cap segments surveyed (merges shortest first)
+    cells_per_sheet: 20           # keyframes per contact-sheet sent to the VLM
+    top_n: 0                      # keep only the N strongest picks (0 = all)
+
 fusion:
   # final score = weighted sum of normalized signal strengths
   weights:
@@ -124,12 +174,26 @@ vision:
     min_points: 4
     sample_every_frames: 1
     smoothing: 0.8
+    validate: true              # reject implausible homographies ("lines into sky")
+    validate_margin_m: 40.0     # image corners must map within pitch + this margin (m)
+    validate_max_cond: 10000000 # max condition number of H before it's rejected
 
   # ---- team classification -> possession-aware protagonist (L3) ----
   teams:
     enabled: true               # HSV jersey clustering (no extra model needed)
     method: hsv                 # hsv | siglip
     n_teams: 2
+
+  # ---- jersey number recognition (EasyOCR) -> hero match by number ----
+  # Lets the Director's "follow #18" bind to the right track id instead of just
+  # the nearest player to the ball. Best on close/replay frames; degrades to the
+  # geometric pick when numbers can't be read on wide shots.
+  jerseys:
+    enabled: true
+    sample_every_frames: 3      # OCR every Nth frame (cost control)
+    min_box_height_px: 60       # skip tiny far-away players
+    min_confidence: 0.35        # aggregate confidence to trust a number
+    min_reads: 2                # need at least this many sightings
 
 telestration:
   enabled: true
@@ -140,18 +204,100 @@ telestration:
   freeze_callout: true          # freeze + zoom + arrow before key action
   arrow_color: [0, 200, 255]    # BGR
   spotlight_color: [0, 220, 255]
-  trail_color: [255, 255, 255]
-  line_thickness: 4
+  trail_color: [255, 255, 255]  # ball trail = white neon
+  line_thickness: 2             # SLEEK halos: thin outline (<=2px), not heavy
+  team_halos: true              # colour every player's halo in their club colour
+                                # (from vision.teams); hero gets a slightly thicker ring
+  halo_grounded: true           # draw only the lower arc so rings sit UNDER the
+                                # boots on the grass (seg-mask-free occlusion)
+  # Vivid NEON team palette (BGR), assigned by team label so rings read clearly
+  # on broadcast (instead of the muddy median-jersey colour). team0 / team1 / ...
+  team_palette:
+    - [60, 60, 255]             # team 0 -> neon red
+    - [40, 230, 255]            # team 1 -> neon yellow
+  trail_length: 12              # ball trail length in frames (10-15 = quick neon spark)
+  trail_max_jump_frac: 0.05     # FLUSH the trail if the ball jumps > this*frame_w in
+                                # one frame (noise re-detection) — kills "lines into the sky"
+  halo_hold_frames: 6           # keep the hero halo for N frames if detection drops
+  halo_smooth: 0.5              # EMA factor for the hero halo box (anti-flicker)
+  possession_plate: true        # compact semi-transparent POSSESSION plate (bottom)
+  # Full seg-mask under-player occlusion (graphics strictly BENEATH players).
+  # Opt-in: needs a YOLO*-seg model (auto-downloaded via Ultralytics/modelhub).
+  # When off, the grounded lower-arc halo (halo_grounded) is the seg-free
+  # approximation; if on but the model can't load, we fall back to that arc too.
+  occlusion: false              # composite halos/lines UNDER player seg-masks
+  occlusion_model: yolo11x-seg.pt  # YOLO11-seg weights (Ultralytics auto-fetch); person/player masks
+  occlusion_alpha: 0.85         # graphics-layer blend strength under players
+  occlusion_conf: 0.3           # seg detection confidence
+
+# ---- shot segmentation (broadcast camera cuts) ----
+# The studio plans tracking + crop PER SHOT so the 9:16 camera resets at every
+# cut instead of gliding across it, and flags literal-duplicate replay inserts.
+shots:
+  enabled: true
+  threshold: 27.0               # PySceneDetect ContentDetector sensitivity
+  min_seconds: 0.6              # merge shorter shots into their neighbour
+  detect_replays: true          # flag near-identical repeated shots (conservative)
+  replay_correlation: 0.97      # HSV-hist correlation to call a shot a duplicate
 
 edit:
   reframe:
     target_aspect: "9:16"       # 9:16 | 1:1 | 16:9
     mode: action_track          # action_track | center | letterbox
     smoothing: 0.85             # camera smoothing for the virtual crop
+    # Aggressive action-centric punch-in, BUT bounded so we never up-scale a
+    # 1080p broadcast into a blurry mess. A 9:16 slice of 1080p is already ~1.8x
+    # up-scaled to 1080x1920; extra zoom multiplies that. 0.55 target + 1.5 max
+    # keeps total up-scale ~2.3x (still sharp). For a true 65-70% fill you need a
+    # 4K source — otherwise the punch-in pixelates on wide crowd/replay shots.
+    target_subject_height: 0.55
+    min_zoom: 1.0               # never wider than full-height slice
+    max_zoom: 1.5               # anti-blur cap (was 2.6 -> heavy up-scale on wide shots)
+    # Anticipation: shift the focus point ahead of the ball along its velocity so
+    # the camera LEADS the play instead of chasing it. 0.15 = lead by 15% of the
+    # ball's per-second travel. The lead is clamped so a noisy detection can't fling it.
+    lead_gain: 0.15             # focus lead = lead_gain * ball_velocity (per second)
+    lead_max_frac: 0.18         # cap the lead offset at this fraction of frame size
+    # DYNAMIC SUBJECT FOLLOW: the crop target is a blend of the hero player and
+    # the ball whose mix follows the ball's speed. When the ball is FLYING
+    # (a pass/shot) the camera commits to the ball; when the ball is SLOW or
+    # moving WITH a player (a dribble / possession / skill accent) it commits to
+    # the hero. Set follow_dynamic=false for the old static 50/50 blend.
+    follow_dynamic: true
+    focus_ball_weight: 0.5      # static blend weight (used only when follow_dynamic=false)
+    follow_ball_speed_lo_frac: 0.08  # ball speed (frac of frame diagonal / s) below
+                                     # which we treat it as "with a player" -> follow hero
+    follow_ball_speed_hi_frac: 0.35  # ball speed above which it is "flying" -> follow ball
+    follow_ball_weight_lo: 0.30      # ball weight at/below lo speed (favours the hero)
+    follow_ball_weight_hi: 0.92      # ball weight at/above hi speed (favours the ball)
+    follow_weight_smooth: 0.80       # EMA on the follow weight so it eases between subjects
+    # Hard limits on how fast the crop window may pan/zoom (anti-jerk), applied
+    # after Kalman smoothing. Fractions of frame size PER SECOND.
+    max_pan_frac_per_s: 0.6     # max horizontal/vertical crop-centre speed
+    max_zoom_rate_per_s: 0.5    # max crop-size change rate (fraction/s)
+    # Prefer trimming the TOP of the broadcast frame (live score-bug / stands)
+    # over the bottom pitch when the crop is zoomed in enough to have headroom.
+    # 0 = centred (no bias); 0.5 = use half the headroom to drop the top band.
+    vertical_bias: 0.5
+    # ANTI-BLUR: hard ceiling on how much the 9:16 slice may be up-scaled to the
+    # output. A 1080p 9:16 slice already up-scales ~1.8x to 1080x1920, so 1.9
+    # keeps a sharp near-full-height follow (no pixelated punch-in); a 4K source
+    # can still punch in tighter before hitting this ceiling.
+    max_upscale: 1.9
   effects:
     slowmo_on_key: true
     slowmo_factor: 0.4
     slowmo_window: 2.5
+    slowmo_interpolate: true          # motion-interpolate the slowed window so
+                                      # it glides instead of stepping/juddering
+    slowmo_interpolation_quality: mci # mci (motion-compensated) | blend (cheap)
+    # Audio under a slow-mo window. Pitch-preserved time-stretch alone warbles
+    # ("slowed demon voice") at 0.4x, so the default MUFFLES it (band-pass +
+    # duck) for a clean 'underwater' slow bed that snaps back to normal after.
+    #   muffle  = tasteful underwater bed (default)
+    #   mute    = silence during the slow window (soft cross-faded)
+    #   stretch = legacy full pitch-preserved atempo
+    slowmo_audio: muffle
     freeze_zoom: true
     freeze_zoom_scale: 1.4
   audio:
@@ -159,13 +305,34 @@ edit:
     crowd_sfx: assets/sfx/crowd_roar.wav
     music_db: -16.0             # music loudness target (LUFS-ish)
     music_volume: 0.35          # linear gain applied to the music bed
-    duck_under_commentary: true
+    duck_under_commentary: true # sidechain-duck music when the commentator speaks
+    loudnorm: true              # EBU R128 normalize the final mix
+    loudness_target_lufs: -14   # social-platform target (TikTok/Reels/Shorts)
+    beat_sync: false            # snap slow-mo onset / cut-in to the music beat
+    beat_snap_max_shift: 0.12   # max seconds a timestamp may be nudged onto a beat
+    beat_drop_max_shift: 0.35   # wider tolerance to land AI slow-mo on a bass drop
+    beat_drop_frac: 0.5         # top-fraction of beats (by accent) treated as drops
+    beat_min_beats_per_segment: 4  # compilation: min whole beats each segment lasts
   captions:
     enabled: true
     style: tiktok               # tiktok | clean | broadcast
-    font: assets/fonts/Inter-Bold.ttf
-    fontsize: 58
+    font: assets/fonts/Inter-Bold.ttf   # Montserrat/Teko preferred if present (assets/fonts)
+    fontsize: 58                # legacy absolute fallback for burned captions
+    safe_y: 0.62                # vertical position as a fraction of height;
+                                # kept above the bottom ~20% platform-UI band
     max_words_per_line: 4
+    # ---- reference-look typography (sizes are fractions of frame height) ----
+    hook_scale: 0.030           # hook text height (<=3% of frame height — compact)
+    plate_scale: 0.020          # stat-plate text height (~38px @1920) — was 0.026
+    max_lines: 2                # word-wrap the hook to at most N lines (never truncate)
+    hook_y_frac: 0.13           # hook vertical anchor (top, reference-like)
+    box_opacity: 0.30           # semi-transparent plate behind text (~30%)
+    strip_emoji: true           # drop glyphs the TTF can't render (no tofu boxes)
+    # broadcast scoreboard/score-bug safe band at the top of the frame; the hook
+    # is pushed just below it so overlays never sit on top of the live scoreboard.
+    scoreboard_safe_top_frac: 0.18
+    avoid_scoreboard: true      # keep the hook below the broadcaster scoreboard (top 18%)
+    reaction_only: true         # stat plates only inside reaction/replay windows
 
 render:
   encoder: h264_nvenc           # h264_nvenc | libx264
@@ -184,3 +351,149 @@ render:
     reels:    { width: 1080, height: 1920, fps: 30 }
     shorts:   { width: 1080, height: 1920, fps: 30 }
     youtube:  { width: 1920, height: 1080, fps: 30 }
+
+
+# ============================================================
+# v2 studio pipeline (src/studio_pipeline.py) — Scout/Director/
+# Cameraman/Composer. The legacy pipeline ignores these blocks.
+# ============================================================
+
+# ---- Director: vision-LLM editing manifest ----
+# On Modal the served brain is Qwen2.5-VL-72B-Instruct-AWQ (vLLM, A100-80GB);
+# wire it by setting backend=openai + base_url (or the FHS_VLM_URL env, which the
+# Modal web()/studio functions translate automatically). Default stays heuristic
+# so the pipeline runs offline with no GPU/network.
+director:
+  backend: heuristic            # heuristic | gemini | openai (Qwen2.5-VL/local vLLM)
+  model: gemini-1.5-flash       # gemini id, or openai/local model name (e.g. qwen2.5-vl)
+  base_url: null                # OpenAI-compatible endpoint (e.g. the vLLM /v1 URL)
+  sample_fps: 1.0               # frames/sec fed to the model
+  max_frames: 6                 # keyframes to the VLM (>=8 full clips can exceed
+                                # the 16k ctx even downscaled -> 400; 6@768px is safe)
+  temperature: 0.4
+  max_retries: 2                # vision-LLM JSON call retries before fallback
+  timeout: 60                   # seconds per vision-LLM call
+  use_asr: false                # transcribe commentary (faster-whisper) for context
+  asr_model: base               # faster-whisper model id when use_asr=true
+  allow_curation: true          # let the Director drop clips it judges non-highlights
+  # offline cutaway/bench safety net (drops a clip with almost no ball AND very
+  # few players on screen; never drops a score-verified goal). Works without VLM.
+  drop_cutaways: true
+  cutaway_min_ball_frac: 0.05
+  cutaway_min_players: 3.0
+  # per-shot action-span trim: within a kept clip, drop leading/trailing cutaway
+  # SHOTS (crowd / celebration close-ups / replay graphics) and keep only the
+  # contiguous run of real play around the action. Contiguous -> audio stays in
+  # sync. Reuses cutaway_min_* thresholds.
+  trim_cutaways: true
+  action_min_seconds: 5.0        # never trim the play below this many seconds
+  # offline hook fallbacks if no LLM and no brand hooks
+  hooks: {}
+
+# ---- Cameraman: BoT-SORT + camera motion compensation + smoothing ----
+tracking:
+  backend: ultralytics          # ultralytics (built-in BoT-SORT+GMC) | roboflow
+  gmc_method: sparseOptFlow      # sparseOptFlow | orb | sift | ecc | none
+  track_high_thresh: 0.25
+  track_low_thresh: 0.1
+  new_track_thresh: 0.25
+  track_buffer: 60
+  match_thresh: 0.8
+  with_reid: false
+  # viewport smoothing (constant-velocity Kalman; EMA fallback)
+  kalman_process_noise: 2.0      # higher = camera reacts faster
+  kalman_measurement_noise: 120.0  # higher = camera is lazier/smoother
+  smoothing: 0.85                # EMA alpha (used only if Kalman fails)
+
+# ---- Graphics: pitch homography for grass-anchored overlays ----
+graphics:
+  enabled: false                 # opt-in; needs the pitch model (auto-downloaded)
+  homography_solver: cv2         # cv2 (RANSAC) | kornia | kornia_lines
+
+# ---- Possession: ball-to-nearest-player proximity tracking ----
+possession:
+  radius_m: 1.5                  # blueprint: ~1 m; 1.5 m is practical for broadcast
+  min_frames: 3                  # blueprint: hold > 3 frames to confirm
+  bridge_frames: 3               # tolerate brief detection dropouts within a run
+
+
+# ---- QA + review loop (v3): watch the rendered output, fix, re-render ----
+# The studio renders the Director's EditPlan, runs deterministic QA on the
+# output (black bars / dead frames / loudness / duration), optionally asks the
+# vision Critic "does it look good", and revises the plan up to max_revisions.
+qa:
+  enabled: true
+  max_revisions: 1               # bounded re-renders when QA/critic flag issues
+  pass_score: 0.75               # average check score needed to pass
+  use_critic: true               # also ask the vision-LLM critic (if configured)
+  use_guardrail: true            # fact-check overlays: never show a stat/score/number
+                                 # the data doesn't support (drops unverified claims)
+  critic_pass_score: 0.7
+  critic_frames: 8               # output keyframes shown to the critic
+  loudness_tolerance: 3.0        # LUFS tolerance around the target
+  zoom_relax: 0.8                # factor to relax per-shot zoom on crop-jump
+  # min_seconds / max_seconds: optional duration window (unset => no duration gate)
+
+
+# ---- audio-event perception (v3): crowd-roar / spike cue for Scout+Director ----
+audio_events:
+  enabled: true
+  sample_rate: 16000
+  hop_seconds: 0.5
+  roar_z: 3.0                   # robust z-score for a sustained crowd roar
+  spike_z: 5.0                  # short loud transient (whistle/impact)
+  roar_min_seconds: 1.0
+
+# ---- cross-shot hero Re-ID (v3): follow the same player through cuts ----
+reid:
+  enabled: true
+  backend: histogram            # histogram | osnet (osnet needs torchreid)
+  min_sim: 0.5                  # min appearance similarity to link a track
+
+
+# ---- premium look-up (src/render/enhance.py): model restoration + grade ----
+# A plain resize does NOT look premium — this reconstructs detail with a model
+# (opt-in, GPU) and always applies a cinematic finishing grade. When the model
+# package/weights are absent it degrades to grade-only (honest, never faked).
+enhance:
+  enabled: false                # master switch (studio runs it only when true)
+  backend: auto                 # auto (model->grade) | realesrgan | grade
+  model: realesr-general-x4v3   # realesr-general-x4v3 | RealESRGAN_x4plus | *anime*
+  scale: 2                      # model upscale factor (frames resized back to source res)
+  tile: 512                     # tile size for limited VRAM (0 = whole frame)
+  face_enhance: false           # GFPGAN face restoration for close-ups (extra model)
+  half: true                    # fp16 inference on GPU
+  grade:                        # always-available ffmpeg cinematic finish
+    enabled: true
+    contrast: 1.06
+    brightness: 0.02
+    saturation: 1.12
+    gamma: 0.98
+    sharpen: 0.8                # contrast-adaptive unsharp amount
+    denoise: true               # light spatial+temporal denoise (hqdn3d)
+
+
+
+# ---------------------------------------------------------------------------
+# Large multimodal LLM — the AI Director + Critic brain.
+# Points the OpenAI-compatible client at NVIDIA NIM's hosted Cosmos-3 reasoning
+# VLM (structured reasoning over video/images), removing the local vLLM per-request
+# image cap that caused the 400 "prompt + multimodal tokens" errors.
+llm:
+  base_url: "https://integrate.api.nvidia.com/v1"
+  # local NIM docker alternative (self-hosted container):
+  # base_url: "http://localhost:8000/v1"
+  model_name: "meta/llama-4-maverick-17b-128e-instruct"   # best accessible VLM
+                                           # (verified live): natively multimodal,
+                                           # clean JSON, multi-image. 'cosmos3-nano-
+                                           # reasoner' is self-host-only; cosmos-reason2
+                                           # /vila/gemma-3/phi-vision 404 for this account.
+                                           # alt accessible: meta/llama-3.2-90b-vision-instruct
+  tile_frames: true                        # pack keyframes into ONE contact-sheet so
+                                           # the VLM sees the whole 24-frame sequence
+                                           # (also sidesteps per-request image caps)
+  max_sampled_frames: 24         # keyframes/clip fed to the VLM (24 over ~30s)
+  # SECURITY: the real key is read from the NVIDIA_API_KEY env var FIRST; this
+  # config value is a fallback. Do NOT commit a live nvapi- key to a public repo
+  # (it will be scanned + revoked). Set:  export NVIDIA_API_KEY=nvapi-...
+  api_key: ""

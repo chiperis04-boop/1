@@ -66,6 +66,62 @@ def load_branding(path: str | Path = "config/branding.yaml") -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# fonts / text
+# --------------------------------------------------------------------------- #
+# Reference-look display families (Montserrat / Teko) are preferred, then the
+# explicitly-configured font, then Inter, then a couple of common system paths.
+# Never raises: returns "" if nothing is found so callers can fall back to a
+# built-in font instead of failing the render.
+_FONT_DIR = Path("assets/fonts")
+_FONT_PREFERENCE = (
+    "Montserrat-Bold.ttf",
+    "Teko-Bold.ttf",
+    "Teko-Medium.ttf",
+)
+_FONT_SYSTEM_FALLBACKS = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def resolve_font(explicit: str | None = None) -> str:
+    """Resolve a usable TTF path following the reference typography preference:
+    bundled Montserrat/Teko -> explicit config font -> bundled Inter -> system
+    DejaVu. Returns "" when nothing exists."""
+    candidates: list[Path] = [_FONT_DIR / n for n in _FONT_PREFERENCE]
+    if explicit:
+        candidates.append(Path(explicit))
+    candidates.append(_FONT_DIR / "Inter-Bold.ttf")
+    candidates += [Path(p) for p in _FONT_SYSTEM_FALLBACKS]
+    for c in candidates:
+        try:
+            if c and c.exists():
+                return str(c)
+        except OSError:
+            continue
+    return ""
+
+
+# codepoint ranges our text fonts can't render (would show as .notdef tofu)
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF),
+    (0x1F1E6, 0x1F1FF), (0xFE00, 0xFE0F), (0x2190, 0x21FF),
+)
+
+
+def sanitize_text(text: str | None) -> str:
+    """Drop emoji/pictographs a text font can't render and collapse whitespace,
+    keeping burned-in hooks/captions clean instead of full of tofu boxes."""
+    if not text:
+        return ""
+    out = [ch for ch in text
+           if not (any(lo <= ord(ch) <= hi for lo, hi in _EMOJI_RANGES)
+                   or ord(ch) == 0x200D)]
+    return " ".join("".join(out).split())
+
+
+# --------------------------------------------------------------------------- #
 # ffprobe
 # --------------------------------------------------------------------------- #
 def ffprobe(path: str | Path) -> dict[str, Any]:
@@ -117,3 +173,75 @@ def ensure_dir(path: str | Path) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+
+def downscale_max(frame, max_side: int = 768):
+    """Downscale a BGR frame so its longest side is <= max_side (keep aspect).
+
+    Vision-LLM image-token count scales with resolution; sending full-res 1080p
+    keyframes blows past the model context (vLLM 400: 'prompt ... plus multimodal
+    tokens'). 768px keeps enough detail for the Director/Critic at a fraction of
+    the tokens. No-op if already small enough."""
+    try:
+        import cv2
+        h, w = frame.shape[:2]
+        m = max(h, w)
+        if m <= max_side:
+            return frame
+        s = max_side / float(m)
+        return cv2.resize(frame, (max(1, int(w * s)), max(1, int(h * s))),
+                          interpolation=cv2.INTER_AREA)
+    except Exception:  # noqa: BLE001
+        return frame
+
+
+
+def montage_jpeg(frames, max_frames: int = 24, cell: int = 256,
+                 max_canvas: int = 1024, quality: int = 72):
+    """Tile JPEG-encoded keyframes into ONE contact-sheet JPEG.
+
+    Hosted VLM endpoints (e.g. NVIDIA NIM llama-3.2-vision) accept only ONE image
+    per request. Packing up to `max_frames` keyframes into a single grid image
+    gives the reasoning VLM the temporal context (motion / ball trajectory /
+    footwork) within that limit. The sheet is kept small (<=max_canvas px, JPEG
+    q<=72) so it stays under NIM's 180KB inline-image cap. Returns a 1-element
+    list of JPEG bytes; passes through unchanged for 0/1 frame or on any failure.
+    """
+    try:
+        import math
+
+        import cv2
+        import numpy as np
+        if not frames or len(frames) <= 1:
+            return frames
+        frames = frames[:max_frames]
+        imgs = []
+        for fb in frames:
+            arr = cv2.imdecode(np.frombuffer(fb, np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                continue
+            h, w = arr.shape[:2]
+            s = cell / float(max(h, w))
+            imgs.append(cv2.resize(arr, (max(1, int(w * s)), max(1, int(h * s))),
+                                   interpolation=cv2.INTER_AREA))
+        if not imgs:
+            return frames
+        cols = int(math.ceil(math.sqrt(len(imgs))))
+        rows = int(math.ceil(len(imgs) / cols))
+        ch = max(i.shape[0] for i in imgs)
+        cw = max(i.shape[1] for i in imgs)
+        canvas = np.zeros((rows * ch, cols * cw, 3), dtype=np.uint8)
+        for i, im in enumerate(imgs):
+            y, x = (i // cols) * ch, (i % cols) * cw
+            canvas[y:y + im.shape[0], x:x + im.shape[1]] = im
+        m = max(canvas.shape[:2])
+        if m > max_canvas:
+            s = max_canvas / float(m)
+            canvas = cv2.resize(canvas, (int(canvas.shape[1] * s),
+                                         int(canvas.shape[0] * s)),
+                                interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", canvas, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return [buf.tobytes()] if ok else frames
+    except Exception:  # noqa: BLE001
+        return frames

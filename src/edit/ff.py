@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -142,19 +143,33 @@ def pick_hwaccel(requested: str) -> str:
     return ""
 
 
-def venc_args(encoder: str) -> list[str]:
+def venc_args(encoder: str, intermediate: bool = False) -> list[str]:
+    """Video-encoder args.
+
+    `intermediate=True` returns near-visually-lossless settings for INTERNAL
+    passes (graphics/reframe/slow-mo), so chaining several render stages no
+    longer softens the image through repeated lossy generations. The final,
+    delivered encode uses the normal (smaller) quality settings.
+    """
+    if intermediate:
+        if encoder == "h264_nvenc":
+            return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "14",
+                    "-pix_fmt", "yuv420p"]
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
+                "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
         return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "21", "-pix_fmt", "yuv420p"]
     return ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p"]
 
 
 def standardize(src: str, out: str, w: int, h: int, fps: int,
-                encoder: str = "libx264") -> str:
+                encoder: str = "libx264", trim: float | None = None) -> str:
     """Force `src` to exactly 1 video + 1 stereo AAC@48k audio track at WxH/fps.
 
     Pads/letterboxes to preserve aspect, and synthesises a silent audio track
     when the source has none. After this, clips are safe to concatenate.
-    """
+    `trim` (seconds), when given, caps the output duration (used for beat-aligned
+    compilation cut points)."""
     vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
           f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,"
           f"fps={fps},format=yuv420p,setsar=1")
@@ -168,8 +183,10 @@ def standardize(src: str, out: str, w: int, h: int, fps: int,
 
     cmd += ["-vf", vf, "-map", "0:v:0", "-map", amap,
             *venc_args(encoder),
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-            "-shortest", out]
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+    if trim and trim > 0:
+        cmd += ["-t", f"{float(trim):.3f}"]
+    cmd += ["-shortest", out]
     run(cmd, desc=f"standardize {Path(src).name}")
     return out
 
@@ -190,7 +207,7 @@ def esc_drawtext(text: str) -> str:
 
 
 def mux_audio(video_only: str, audio_src: str, out: str,
-              encoder: str = "libx264") -> str:
+              encoder: str = "libx264", intermediate: bool = False) -> str:
     """Combine a (possibly silent) video file with the audio from `audio_src`.
 
     Re-encodes video to H.264 for downstream compatibility and synthesises a
@@ -204,7 +221,94 @@ def mux_audio(video_only: str, audio_src: str, out: str,
         cmd += ["-f", "lavfi", "-i",
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-map", "0:v:0", "-map", "1:a"]
-    cmd += [*venc_args(encoder), "-c:a", "aac", "-b:a", "192k",
+    cmd += [*venc_args(encoder, intermediate), "-c:a", "aac", "-b:a", "192k",
             "-ar", "48000", "-ac", "2", "-shortest", out]
     run(cmd, desc="mux audio")
     return out
+
+
+def minterpolate_expr(fps: int, quality: str = "mci") -> str:
+    """Motion-interpolation filter for smooth slow-motion.
+
+    `mci` (motion-compensated interpolation) synthesises genuinely new
+    in-between frames so a stretched segment plays fluidly instead of stepping
+    through duplicated frames. `blend` is a cheaper cross-fade fallback.
+    """
+    if quality == "blend":
+        return f"minterpolate=fps={int(fps)}:mi_mode=blend"
+    return (f"minterpolate=fps={int(fps)}:mi_mode=mci:mc_mode=aobmc:"
+            f"me_mode=bidir:vsbmc=1")
+
+
+class RawFrameSink:
+    """Pipe raw BGR frames straight into a single ffmpeg encode (+ audio mux).
+
+    Replaces the old "cv2.VideoWriter(mp4v) -> ff.mux_audio()" pattern, which
+    compressed twice (lossy MPEG-4 part-2 intermediate, then re-encode to
+    H.264). Here frames are encoded ONCE with the project's H.264 args and the
+    audio is muxed from `audio_src` in the same pass, so there is no
+    generational quality loss and no extra transcode.
+
+    Usage:
+        sink = ff.RawFrameSink(out, w, h, fps, encoder, audio_src=clip)
+        for frame in frames:   # HxWx3 uint8, BGR, contiguous
+            sink.write(frame)
+        sink.close()
+    """
+
+    def __init__(self, out_path: str, width: int, height: int, fps: float,
+                 encoder: str = "libx264", audio_src: str | None = None,
+                 intermediate: bool = False, audio_start: float = 0.0):
+        self.out_path = out_path
+        self.width = int(width)
+        self.height = int(height)
+        self._stderr = tempfile.TemporaryFile()
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-pix_fmt", "bgr24",
+            "-s", f"{self.width}x{self.height}", "-r", f"{fps}",
+            "-i", "pipe:0",
+        ]
+        has_aud = bool(audio_src) and has_audio(audio_src)
+        if has_aud:
+            # audio_start offsets the muxed audio so it stays in sync when only a
+            # sub-range of frames is rendered (action-span trim).
+            if audio_start and audio_start > 0:
+                cmd += ["-ss", f"{float(audio_start):.3f}"]
+            cmd += ["-i", audio_src, "-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            cmd += ["-f", "lavfi", "-i",
+                    "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    "-map", "0:v:0", "-map", "1:a"]
+        cmd += [*venc_args(encoder, intermediate), "-c:a", "aac", "-b:a", "192k",
+                "-ar", "48000", "-ac", "2", "-shortest", out_path]
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                      stdout=subprocess.DEVNULL,
+                                      stderr=self._stderr)
+
+    def write(self, frame_bgr) -> None:
+        # frame must be HxWx3 uint8 BGR matching (height, width)
+        try:
+            self._proc.stdin.write(memoryview(frame_bgr.tobytes()))
+        except BrokenPipeError:
+            self._raise_from_stderr()
+
+    def close(self) -> str:
+        try:
+            self._proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        rc = self._proc.wait()
+        if rc != 0:
+            self._raise_from_stderr(rc)
+        self._stderr.close()
+        return self.out_path
+
+    def _raise_from_stderr(self, rc: int | None = None) -> None:
+        self._stderr.seek(0)
+        tail = self._stderr.read().decode("utf-8", "ignore").strip().splitlines()
+        self._stderr.close()
+        raise FFmpegError(
+            f"ffmpeg raw-frame encode failed (exit {rc}):\n"
+            + "\n".join(tail[-12:])
+        )

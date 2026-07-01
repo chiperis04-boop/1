@@ -40,13 +40,32 @@ def compose_clip(clip_path: str, out_path: str, cfg: dict, branding: dict,
         inputs += ["-f", "lavfi", "-i",
                    "anullsrc=channel_layout=stereo:sample_rate=48000"]
     base_audio = "1:a" if not src_has_audio else "0:a"
-    amix_parts = [f"[{base_audio}]"]
     next_idx = 2 if not src_has_audio else 1
 
-    music_vol = e["audio"].get("music_volume", 0.35)
+    au = e["audio"]
+    music_vol = au.get("music_volume", 0.35)
+    duck = au.get("duck_under_commentary", True) and src_has_audio and bool(music)
+    loud = au.get("loudnorm", True)
+    lufs = au.get("loudness_target_lufs", -14)
+
+    # speech (original commentary/crowd) is the anchor; when ducking we split it
+    # so a copy can key the sidechain compressor that pulls the music down
+    # whenever the commentator speaks.
+    speech_label = f"[{base_audio}]"
+    sidechain_label = None
+    if duck:
+        filt.append(f"[{base_audio}]asplit=2[sp][sk]")
+        speech_label, sidechain_label = "[sp]", "[sk]"
+    amix_parts = [speech_label]
+
     if music:
         inputs += ["-stream_loop", "-1", "-i", music]
-        filt.append(f"[{next_idx}:a]volume={music_vol}[mus]")
+        if duck:
+            filt.append(f"[{next_idx}:a]volume={music_vol}[musv]")
+            filt.append(f"[musv]{sidechain_label}sidechaincompress="
+                        f"threshold=0.03:ratio=6:attack=20:release=300:makeup=1[mus]")
+        else:
+            filt.append(f"[{next_idx}:a]volume={music_vol}[mus]")
         amix_parts.append("[mus]")
         next_idx += 1
 
@@ -56,10 +75,16 @@ def compose_clip(clip_path: str, out_path: str, cfg: dict, branding: dict,
         amix_parts.append("[crowd]")
         next_idx += 1
 
+    loud_suffix = f",loudnorm=I={lufs}:TP=-1.5:LRA=11" if loud else ""
     if len(amix_parts) > 1:
+        # normalize=0 keeps the commentary at full level (we set per-input gains
+        # ourselves); loudnorm then brings the whole mix to the social target.
         filt.append("".join(amix_parts) +
                     f"amix=inputs={len(amix_parts)}:duration=first:"
-                    f"dropout_transition=2,dynaudnorm[aout]")
+                    f"dropout_transition=2:normalize=0{loud_suffix}[aout]")
+        amap = "[aout]"
+    elif loud:
+        filt.append(f"[{base_audio}]loudnorm=I={lufs}:TP=-1.5:LRA=11[aout]")
         amap = "[aout]"
     else:
         amap = base_audio
@@ -78,7 +103,7 @@ def compose_clip(clip_path: str, out_path: str, cfg: dict, branding: dict,
         "-filter_complex", ";".join(filt),
         "-map", "[vout]", "-map", amap,
         *ff.venc_args(encoder), "-c:a", "aac", "-b:a", "192k",
-        "-shortest", out_path,
+        "-ar", "48000", "-ac", "2", "-shortest", out_path,
     ], desc="compose")
 
     for f in cap_files:
@@ -117,6 +142,10 @@ def _caption_drawtext(captions: list[dict], cfg: dict, out_path: str):
     """
     font = cfg["edit"]["captions"]["font"]
     fontsize = cfg["edit"]["captions"].get("fontsize", 58)
+    # keep captions inside the social safe-zone: TikTok/Reels/Shorts overlay
+    # their own UI (captions, buttons, handle) across the bottom ~20%, so sit
+    # the text a bit higher than dead-centre-bottom.
+    safe_y = cfg["edit"]["captions"].get("safe_y", 0.62)
     parts, files = [], []
     for i, c in enumerate(captions):
         text = (c.get("text") or "").strip()
@@ -130,7 +159,7 @@ def _caption_drawtext(captions: list[dict], cfg: dict, out_path: str):
         parts.append(
             f"drawtext={fontclause}textfile={tf}:expansion=none:"
             f"fontcolor=white:fontsize={fontsize}:borderw=4:bordercolor=black:"
-            f"x=(w-text_w)/2:y=h*0.72:"
+            f"x=(w-text_w)/2:y=h*{safe_y:.3f}:"
             f"enable='between(t,{start:.2f},{end:.2f})'"
         )
     return (",".join(parts), files) if parts else ("", [])

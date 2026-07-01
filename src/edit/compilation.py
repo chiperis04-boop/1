@@ -47,7 +47,12 @@ def select_for_duration(items: list[dict], target: float, dur_max: float,
 
 def build_compilation(segments: list[str], out_path: str, cfg: dict,
                       branding: dict) -> str:
-    """Assemble standardized segments into a finished reel."""
+    """Assemble standardized segments into a finished reel.
+
+    When `edit.audio.beat_sync` is on and a music track is available, each
+    segment is trimmed so the cut lands on a musical beat (transitions on the
+    beat = the montage feels professional); the one continuous music bed then
+    lines the cuts up with the track."""
     if not segments:
         raise ValueError("no segments to compile")
 
@@ -57,11 +62,13 @@ def build_compilation(segments: list[str], out_path: str, cfg: dict,
     encoder = ff.pick_encoder(cfg["render"]["encoder"])
     work = Path(out_path).parent
 
-    # 1) standardize every segment so stream params match exactly
+    trims = _beat_cut_plan(segments, cfg)     # per-segment trim (s) or None
+
+    # 1) standardize every segment so stream params match exactly (beat-trimmed)
     std = []
     for i, seg in enumerate(segments):
         s = str(work / f"_seg{i:02d}.mp4")
-        ff.standardize(seg, s, w, h, fps, encoder)
+        ff.standardize(seg, s, w, h, fps, encoder, trim=trims[i] if trims else None)
         std.append(s)
 
     # 2) concat (safe stream-copy after standardize)
@@ -84,6 +91,46 @@ def build_compilation(segments: list[str], out_path: str, cfg: dict,
 
 
 # --------------------------------------------------------------------------- #
+def _beat_cut_plan(segments: list[str], cfg: dict) -> list[float] | None:
+    """Return a per-segment trim length (seconds) that snaps each cut point onto
+    a musical beat, or None if beat-sync is off / no music / no beats.
+
+    The music bed starts at the reel's t=0, so if every segment lasts a whole
+    number of beat periods the cumulative cut points all fall on beats. Each
+    segment is trimmed DOWN to the nearest whole beat-count (never below
+    `min_beats` periods, and never up — trimming keeps the impactful head)."""
+    audio = cfg.get("edit", {}).get("audio", {})
+    if not audio.get("beat_sync", False):
+        return None
+    music = _pick_music(audio.get("music_dir", "assets/music"))
+    if not music:
+        return None
+    try:
+        from .music import detect_beats
+        import numpy as np
+        grid = detect_beats(music, cfg)
+        if not grid or len(grid.beats) < 2:
+            return None
+        period = float(np.median(np.diff(grid.beats)))
+        if period <= 0.05:
+            return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"[compilation] beat-sync unavailable ({exc}); plain cuts")
+        return None
+
+    min_beats = int(audio.get("beat_min_beats_per_segment", 4))
+    trims: list[float] = []
+    for seg in segments:
+        dur = ff.duration(seg)
+        beats = max(min_beats, int(dur / period))     # whole beats that FIT in dur
+        target = beats * period
+        # never extend beyond the real footage; keep a hair under to be safe
+        trims.append(round(min(target, dur), 3))
+    log.info(f"[compilation] beat-sync {grid.bpm:.0f} BPM: cut points on beat "
+             f"(period {period:.2f}s), segment lengths {['%.1f' % t for t in trims]}")
+    return trims
+
+
 def _add_music_bed(body: str, out: str, cfg: dict, encoder: str) -> str:
     music = _pick_music(cfg["edit"]["audio"]["music_dir"])
     if not music:

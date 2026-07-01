@@ -64,13 +64,15 @@ def _download(repo: str, filename: str, dest: str) -> bool:
         return False
 
 
-def ensure_models(cfg: dict, include_pitch: bool | None = None) -> dict:
+def ensure_models(cfg: dict, include_pitch: bool | None = None,
+                  include_seg: bool | None = None) -> dict:
     """Ensure all required model files are present. Returns a status dict.
 
-    Downloads the player + ball detectors always (when vision is enabled), and
-    the pitch model when pitch calibration is enabled (or include_pitch=True).
-    Falls back to the generic COCO YOLO for the player model if the football
-    model can't be fetched, so the pipeline still runs.
+    Downloads the player + ball detectors always (when vision is enabled), the
+    pitch model when pitch calibration is enabled (or include_pitch=True), and
+    the YOLO*-seg model when under-player occlusion is enabled (or
+    include_seg=True). Falls back to the generic COCO YOLO for the player model
+    if the football model can't be fetched, so the pipeline still runs.
     """
     if not cfg.get("models", {}).get("auto_download", True):
         return {"skipped": True}
@@ -106,7 +108,36 @@ def ensure_models(cfg: dict, include_pitch: bool | None = None) -> dict:
         repo, fn = _REGISTRY["pitch"]
         status["pitch"] = _download(repo, fn, pitch_path)
 
+    # player segmentation for under-player occlusion (opt-in)
+    want_seg = (include_seg if include_seg is not None
+                else cfg.get("telestration", {}).get("occlusion", False))
+    if want_seg:
+        status["seg"] = _ensure_seg(cfg)
+
     return status
+
+
+def _ensure_seg(cfg: dict) -> bool:
+    """Ensure the YOLO*-seg occlusion model is available. If it is a bare
+    Ultralytics name (e.g. 'yolo11x-seg.pt') let Ultralytics manage the cache;
+    if it is a repo path under models/ try an HF fetch. Best-effort."""
+    tele = cfg.get("telestration", {})
+    path = tele.get("occlusion_model", "yolo11x-seg.pt")
+    p = Path(path)
+    if p.exists() and p.stat().st_size > 0:
+        return True
+    # bare weight name -> Ultralytics auto-downloads on first YOLO(...) load
+    if "/" not in path and p.suffix == ".pt":
+        try:
+            from ultralytics import YOLO
+            YOLO(path)                      # triggers the cached download
+            log.info(f"[models] seg model '{path}' cached via Ultralytics")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[models] seg model '{path}' prefetch failed: {exc}")
+            return False
+    log.info(f"[models] seg model '{path}' not present; occlusion will fall back")
+    return False
 
 
 def ocr_storage_dir() -> str:

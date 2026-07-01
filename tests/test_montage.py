@@ -139,8 +139,61 @@ def main() -> int:
     print(f"  ✓ reel duration {ff.duration(reel):.2f}s from {len(chosen)} "
           f"segments (sum {seg_sum:.2f}s) + intro/outro")
 
+    # 8) duration targeting: select_for_duration lands a 30-60s reel window
+    synth = [{"path": f"s{i}", "duration": 9.0, "confidence": 0.9 - i * 0.01,
+              "order": i} for i in range(12)]
+    picked = select_for_duration(synth, target=45, dur_max=60, per_moment_max=12)
+    picked_dur = sum(min(p["duration"], 12) for p in picked)
+    assert 30.0 <= picked_dur <= 60.0, f"reel target out of 30-60s: {picked_dur}"
+    # chronological order is restored after the confidence-first pick
+    assert [p["order"] for p in picked] == sorted(p["order"] for p in picked)
+    print(f"  ✓ duration target: picked {len(picked)} moments ~{picked_dur:.0f}s "
+          "(inside 30-60s), chronological")
+
+    # 9) beat-synced compilation: cut points snap to the music beat grid
+    _test_beat_synced_cuts(tmp, [x["path"] for x in chosen])
+
     print("\nALL MONTAGE CHECKS PASSED ✅")
     return 0
+
+
+def _test_beat_synced_cuts(tmp: Path, segments: list[str]):
+    """Generate a 120-BPM click track, then assert the compilation cut plan
+    trims each segment to a whole number of beat periods (transitions on beat),
+    and that a beat-synced reel still renders to a valid 1V+1A mp4."""
+    from src.edit.compilation import _beat_cut_plan, build_compilation
+    from src.edit.music import detect_beats
+
+    music_dir = tmp / "music"
+    music_dir.mkdir(exist_ok=True)
+    click = str(music_dir / "click.wav")
+    # 1 kHz tone gated ON for 30 ms every 0.5 s -> clear onsets at 120 BPM
+    ff.run(["ffmpeg", "-y", "-f", "lavfi",
+            "-i", "aevalsrc=0.6*sin(2*PI*1000*t)*lt(mod(t\\,0.5)\\,0.03):d=8",
+            "-ac", "1", click], desc="click track")
+
+    beat_cfg = {
+        "_active_profile": PROFILE, "render": {"encoder": "libx264", "fps": 30},
+        "audio_events": {"sample_rate": 16000},
+        "edit": {"audio": {"music_dir": str(music_dir), "beat_sync": True,
+                           "music_volume": 0.35, "beat_min_beats_per_segment": 2}},
+    }
+    grid = detect_beats(click, beat_cfg)
+    assert grid and grid.beats, "click track produced no beats"
+    import numpy as np
+    period = float(np.median(np.diff(grid.beats)))
+
+    trims = _beat_cut_plan(segments, beat_cfg)
+    assert trims and len(trims) == len(segments), trims
+    for seg, t in zip(segments, trims):
+        beats = t / period
+        assert abs(beats - round(beats)) < 0.15, f"cut {t:.2f}s not on beat ({beats})"
+        assert t <= ff.duration(seg) + 1e-3, "trim exceeds segment length"
+    print(f"  ✓ beat-sync: {grid.bpm:.0f} BPM, cut points on beat "
+          f"(period {period:.2f}s) -> trims {['%.2f' % t for t in trims]}")
+
+    reel = build_compilation(segments, str(tmp / "reel_beat.mp4"), beat_cfg, BRAND)
+    _assert_av(reel, "beat-synced reel", PROFILE["width"], PROFILE["height"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,383 @@
+# Implementation plan — agentic, frame-aware highlight Studio (v3)
+
+Goal: replace the "script + presets" pipeline with **AI agents that watch the
+footage, understand what happens, decide the whole edit, and review their own
+output** — then deterministic code executes their decisions. Constraints from
+the operator: **cost is irrelevant, models must be open-source, one L40S (48 GB)
+running 24/7.** That lets us run real local vision/audio models per shot and
+iterate with a critic loop.
+
+This is a build plan, phased and verifiable. Each phase lists: modules, the
+open-source model, the data contract, what is CPU-testable vs GPU-only, and an
+exit criterion. Nothing here is "done" yet — it is the path to make it correct.
+
+---
+
+## 0. Model stack (all open-source, fits one L40S 48 GB)
+
+| Role | Model (open-source) | Serving | ~VRAM | Notes |
+|---|---|---|---|---|
+| Director / Critic (vision-LLM) | **Qwen2-VL-7B-Instruct** (AWQ) or **MiniCPM-V-2.6 8B** | vLLM, OpenAI-compatible | 10–18 GB | already reachable via `director._call_openai` (base_url) |
+| Commentary ASR | **faster-whisper large-v3** | in-proc (CTranslate2) | ~3 GB | already in stack (`edit/captions.py`) |
+| Detection + tracking | **Ultralytics YOLO + BoT-SORT (GMC)** | in-proc | ~2–3 GB | already in stack (`tracking/cameraman.py`) |
+| Pitch keypoints / homography | martinjolif pitch model + cv2/kornia | in-proc | ~1 GB | already in stack (`graphics/homography.py`) |
+| Appearance Re-ID (hero across shots) | **OSNet (torchreid)** | in-proc | ~0.5 GB | NEW — stabilises hero ID across cuts |
+| Crowd/whistle audio events | **PANNs (CNN14)** or YAMNet | in-proc | ~0.3 GB | NEW — "goal roar"/whistle cue for Scout |
+
+Everything co-resides on one L40S. If the operator later wants a bigger brain,
+**Qwen2-VL-72B-AWQ** (~40 GB) fits one L40S alone (move YOLO/whisper to a second
+process/GPU) or 2×L40S — the OpenAI-compatible client makes the swap a config
+change, no code change.
+
+Serving: a small **vLLM** container exposes the VLM at an OpenAI-compatible
+endpoint; `director.base_url` / `OPENAI_BASE_URL` already point at it. Weights
+live on a persistent Modal Volume so the 24/7 server has zero cold-download.
+
+---
+
+## 1. Agentic architecture (perception → plan → execute → critique → revise)
+
+```
+ PERCEPTION (tools the agents can call / are fed)
+   shots = segment_shots(clip)          # PySceneDetect content detector
+   asr   = transcribe(clip)             # faster-whisper large-v3, word timestamps
+   det   = detect_track_per_shot(clip)  # YOLO+BoT-SORT, per shot (no cross-cut IDs)
+   reid  = appearance_embeddings(det)   # OSNet, link the hero across shots
+   audio = audio_events(clip)           # PANNs roar/whistle + energy curve
+   ocr   = scoreboard(clip)             # score + Δ
+        │  -> PerceptionBundle (compact, multimodal)
+        ▼
+ DIRECTOR AGENT (vision-LLM, tool-aware, reasoning)
+   input : keyframes (dense at beats) + per-shot thumbs + ASR text + det/audio/ocr summary
+   output: EditPlan (rich, validated JSON)  — the single source of truth
+        ▼
+ EXECUTOR (deterministic; today's renderer, generalised)
+   per-shot crop plans · multi-beat slow-mo · temporally-smoothed graphics ·
+   single high-quality composite · final encode once
+        ▼
+ CRITIC AGENT + programmatic QA  (watch the OUTPUT)
+   deterministic checks first (cheap), then VLM "does this look right?" on output frames
+   → if it fails: structured feedback → Director revises EditPlan → re-execute (≤N loops)
+```
+
+The Director and Critic are **agents** (they reason over real perception and can
+request more frames / a re-cut), not a single templated call. The Executor stays
+dumb and deterministic so renders are reproducible.
+
+---
+
+## 2. Data contracts (the API between brain and hands)
+
+### 2.1 `PerceptionBundle` (`src/perception/bundle.py`)
+```python
+@dataclass
+class Shot:        # one continuous broadcast camera take
+    idx: int; start: float; end: float
+    kind: str           # wide|medium|closeup|crowd|replay|graphic (VLM-labelled)
+    is_replay: bool
+    keyframes: list[bytes]          # JPEGs, dense near motion peaks
+@dataclass
+class PerceptionBundle:
+    clip_path: str; fps: float; duration: float
+    shots: list[Shot]
+    transcript: list[dict]          # {start,end,text} from ASR
+    audio_curve: list[float]        # excitement/energy per second
+    audio_events: list[dict]        # {t, label: roar|whistle|...}
+    detections_summary: str         # compact text the VLM can read
+    score: dict | None              # {before, after, minute} from OCR
+```
+
+### 2.2 `EditPlan` (`src/agents/editplan.py`) — replaces the 6-field manifest
+```python
+@dataclass
+class ShotEdit:
+    shot_idx: int
+    keep: bool                      # drop replays/irrelevant shots
+    framing: str                    # punch_in|crop_follow|letterbox_wide
+    zoom: float                     # 1.0=full crop height .. >1 tighter
+    subject: str                    # hero|ball|wide
+@dataclass
+class SlowmoBeat:
+    start: float; end: float; factor: float
+@dataclass
+class EditPlan:
+    keep_clip: bool                 # the Director can veto a false-positive
+    importance: float               # 0..1 for ranking/compilation
+    event: str                      # goal|chance|save|skill|card
+    cut_in: float; cut_out: float   # precise, aligned to shot/play
+    shots: list[ShotEdit]
+    hero_description: str
+    hero_jersey_shot: int | None    # which shot to read the number from (close-up)
+    slowmo_beats: list[SlowmoBeat]
+    hook_text: str; lower_third: str; caption: str; hashtags: list[str]
+    pacing: str                     # punchy|cinematic
+    music_energy: str               # low|build|high
+    source: str                     # which backend produced it
+    # + coerce()/validate() like EditingManifest, with safe heuristic defaults
+```
+Backward-compat: `EditingManifest` is derived from `EditPlan` so the current
+Composer keeps working during the migration.
+
+---
+
+## 3. Phases
+
+### Phase P0 — correctness & artifact removal (deterministic, CPU-testable) 🔴
+Kills the visible artifacts independent of any LLM. **Do first.**
+
+1. **Shot segmentation in v2** — `src/perception/shots.py` wrapping PySceneDetect
+   (already a dependency). Studio runs tracking + crop planning **per shot**, and
+   the crop **resets at each cut** (no lurch across cuts).
+   - Files: `studio_pipeline._process` (loop over shots), `cameraman.build_plan`
+     (per-shot), new `shots.py`.
+2. **Replay handling** — flag broadcast replays (duplicate of a just-seen play +
+   the broadcast's own slow-mo/graphic signature) and drop them by default.
+3. **Cut the generational re-encode** — compose graphics + typography in a single
+   pass where possible; use a visually-lossless intermediate (`-crf 12` / FFV1)
+   between unavoidable stages; **encode the final once**. Target ≤2 lossy
+   generations (was ~5–6).
+4. **Telestration temporal smoothing** — persist hero halo / track positions
+   across short detection gaps; smooth graphic positions (no flicker).
+
+Exit: on a synthetic multi-shot clip, the crop does not jump at cuts; replays are
+dropped; final file is one clean encode; halos don't flicker. All verifiable on
+CPU with new tests in `tests/test_shots.py` / extended `tests/test_polish.py`.
+
+### Phase P1 — the frame-aware Director (the core) 🧠
+5. **Perception builder** — `src/perception/build.py` assembles a
+   `PerceptionBundle`: `shots.py` + `transcribe()` (faster-whisper) + per-shot
+   keyframes + detection summary + audio events (PANNs) + OCR.
+6. **LLM client** — `src/agents/llm_client.py`: thin OpenAI-compatible client
+   (works with vLLM/Ollama) with vision messages, JSON-mode, retries, schema
+   validation. (Generalises today's `director._call_openai`.)
+7. **Director agent** — `src/agents/director_agent.py`: given a
+   `PerceptionBundle`, returns a validated `EditPlan`. It *curates* (keep/drop +
+   importance), sets precise `cut_in/out` on shot boundaries, per-shot framing,
+   slow-mo beats at the true decisive instants (cross-checked against the audio
+   roar / ball-speed peak), and the hero + the close-up shot to read the number.
+8. **Executor generalisation** — Cameraman honours per-shot `framing/zoom`;
+   Composer does **multi-beat** slow-mo; hero jersey OCR runs only on the
+   Director-chosen close-up shot (multi-read voting) → team-aware geometry
+   fallback (honest about wide-shot unreliability).
+
+Exit: with the local VLM up, the Director's `EditPlan` drives a clip end-to-end;
+moment curation removes obvious false positives; slow-mo lands on the event.
+GPU-only verification on the L40S with real footage.
+
+### Phase P2 — the review / critic loop ("watch & realise") 🧠
+9. **Programmatic QA** — `src/qa/checks.py` on the rendered output: subject-in-
+   frame %, captions inside the social safe-area, crop-jump magnitude at cuts,
+   black-bar/letterbox sanity, loudness (−14 LUFS ±1), duration vs target. Cheap,
+   deterministic, CPU-testable.
+10. **Critic agent** — `src/agents/critic.py`: samples OUTPUT keyframes, asks the
+    VLM "does this look like a pro vertical highlight? what's wrong?", returns
+    structured issues. Director consumes QA + critic feedback and revises the
+    `EditPlan`; re-execute up to **N≤3** loops, keeping the best by QA score.
+
+Exit: the loop measurably improves QA scores; failures (subject lost, text in UI
+band, crop jump) auto-correct. QA is CPU-tested; the VLM critic is GPU-verified.
+
+### Phase P3 — smarter perception (raises the ceiling) 🟠
+11. **Real action understanding** — fuse a SoccerNet-style action-spotting cue +
+    PANNs crowd-roar + ASR keywords ("goal", player names) so Scout becomes a
+    high-recall *candidate generator* and the Director the precise judge.
+12. **Cross-shot hero Re-ID** — OSNet appearance embeddings link the hero through
+    cuts/replays so framing & graphics stay on the right player.
+13. **Music intelligence** — beat-detect the bed (librosa) and align cuts /
+    slow-mo onset to the beat; pick music energy from `EditPlan.music_energy`.
+
+---
+
+## 4. Modal / serving (24/7, no cold starts)
+
+- **vLLM web app** (`modal_app.py` new function `vlm`): serves Qwen2-VL/MiniCPM-V
+  at an OpenAI-compatible endpoint; `keep_warm=1`, weights on a persistent
+  Volume. `director.base_url` points at it.
+- **Worker function** (`studio`/`process`): YOLO + BoT-SORT + faster-whisper +
+  OSNet + PANNs in one GPU container; calls the vLLM endpoint for decisions.
+- All weights pre-baked into the image or on Volume so the always-on server has
+  zero download latency. Health/doctor step in `scripts/setup.py` extended to
+  ping the vLLM endpoint.
+
+---
+
+## 5. Testing strategy (honest boundaries)
+
+- **CPU here (synthetic clips, real ffmpeg):** shot segmentation, per-shot crop
+  reset, replay-drop logic, re-encode-count reduction, graphics smoothing,
+  `EditPlan` schema validation/coercion, QA checks, executor honouring a
+  hand-written `EditPlan`. New: `tests/test_shots.py`, `tests/test_editplan.py`,
+  `tests/test_qa.py`; extend `test_studio.py`/`test_polish.py`.
+- **GPU only (L40S, real match):** VLM Director/Critic quality, ASR accuracy,
+  YOLO/BoT-SORT/Re-ID, homography on real lines, jersey OCR on close-ups, and the
+  end-to-end "does it look good" judgement. These are marked ○ until run on the
+  L40S — we will not claim them verified from CPU.
+
+---
+
+## 6. Risks & fallbacks (no over-promising)
+
+- **VLM latency/quality:** mitigated by per-clip (not per-frame) calls, JSON-mode
+  + schema coercion, and the heuristic as an explicit *blind-mode* fallback.
+- **minterpolate / VLM hallucination:** every agent output is validated; if the
+  plan is malformed or QA fails after N loops, fall back to the deterministic
+  plan (current behaviour) so a clip never fails to render.
+- **Re-ID / OCR on wide shots stays unreliable** — by design we read numbers only
+  on Director-chosen close-ups and degrade to geometry; we keep labelling stats
+  as estimates.
+
+---
+
+## 7. Sequencing (recommended order)
+
+1. P0.1 shot segmentation + per-shot crop reset  ← biggest artifact win, CPU-testable
+2. P0.3 re-encode reduction  ← biggest "softness" win
+3. P0.2 replay-drop, P0.4 graphics smoothing
+4. P1.5–6 perception + LLM client  → P1.7 Director agent → P1.8 executor
+5. P2.9 QA → P2.10 critic loop
+6. P3 perception upgrades (action spotting, Re-ID, music sync)
+
+P0 is fully implementable & verifiable in this environment now. P1–P3 need the
+L40S + local models to validate, but all the plumbing (schemas, client, executor,
+QA) is built and unit-tested on CPU first so that GPU bring-up is configuration,
+not new code.
+
+
+---
+
+## Appendix — P0 status (implemented & CPU-verified)
+
+Done in this pass (deterministic, no GPU needed; new/updated tests all green):
+
+- **Shot segmentation** — `src/perception/shots.py` (`segment_shots` via
+  PySceneDetect, `frame_segments` exact tiling, graceful single-shot fallback).
+  `tests/test_shots.py`.
+- **Per-shot crop reset** — `cameraman._kalman_smooth(..., segments=)` smooths
+  each shot independently; `build_plan(..., shots=)`. Verified: step-at-cut 800
+  vs 10 for whole-clip → no cross-cut glide (`tests/test_studio.py`).
+- **Re-encode reduction** — `ff.venc_args(..., intermediate=True)` visually-
+  lossless internal passes; **graphics merged INTO the crop pass**
+  (`cameraman.render(annotate_world=, annotate_screen=)` + `composer.make_annotators`),
+  removing a whole encode generation. World graphics drawn pre-crop, HUD
+  (possession plate) drawn post-crop → fixes HUD placement.
+  `tests/test_polish.py::test_single_pass_graphics_reframe`.
+- **Telestration anti-flicker** — `composer._smooth_hero` persists + EMA-smooths
+  the hero halo across short detection gaps (`telestration.halo_hold_frames`,
+  `halo_smooth`). `tests/test_studio.py::test_hero_halo_persistence`.
+- **Replay flag (conservative)** — `mark_duplicate_shots` flags literal-duplicate
+  shots; recorded per clip (`StudioClip.replays`). Semantic replay handling
+  (other-angle / slow-mo, and physically cutting them out) is deferred to the
+  Director (P1) which sets `cut_in/out` — physically excising replays mid-clip
+  would break A/V sync, so P0 only flags.
+- **Studio integration** — `studio_pipeline._process` now: segment shots →
+  per-shot tracking/crop → single-pass graphics+reframe → slow-mo+typography.
+  New config block `shots:` and `telestration.halo_*`.
+
+Not yet done (still ○, needs the L40S + local models): P1 (Director agent +
+EditPlan + perception bundle), P2 (QA + critic loop), P3 (action spotting,
+cross-shot Re-ID, music sync).
+
+
+---
+
+## Appendix — P1 status (plumbing implemented & CPU-verified; VLM ○ GPU)
+
+The frame-aware Director is now wired end-to-end. The decision-making model
+itself needs the L40S + a local VLM to judge quality, but ALL the plumbing is
+implemented, mockable and unit-tested on CPU so GPU bring-up is configuration:
+
+- **EditPlan schema** — `src/agents/editplan.py` (`EditPlan`/`ShotEdit`/
+  `SlowmoBeat`) with strict `coerce()` (clamps/defaults, validates beats),
+  `heuristic_plan()` offline fallback, and `to_manifest()` bridge to the existing
+  Composer. `tests/test_agents.py`.
+- **PerceptionBundle** — `src/perception/bundle.py`: shots + keyframes (denser
+  around the decisive beat) + detection summary + optional ASR transcript
+  (faster-whisper, guarded) + score. CPU-safe (heavy parts lazy).
+- **Vision-LLM client** — `src/agents/llm_client.py`: OpenAI-compatible
+  (vLLM/Ollama/LM Studio serving Qwen2-VL/MiniCPM-V) + Gemini, JSON-mode,
+  retries, tolerant `parse_json`, `is_configured()`. Transport mockable.
+- **Director agent** — `src/agents/director_agent.py` `plan_edit(bundle, window,
+  cfg, track, client)`: builds the multimodal prompt, coerces the reply to an
+  EditPlan, fills gaps, and **falls back to the heuristic** on any failure / when
+  unconfigured. Verified with a mock vision client + failure/fallback paths.
+- **Executor generalised** — Cameraman `build_plan(shot_edits=)` applies a
+  **per-shot zoom/framing** (punch-in vs wide) via per-frame crop sizes (verified
+  405px→202px on a zoom=2 shot); Composer `finish(beats=)` + `_slowmo_multi`
+  applies **multiple slow-mo beats** in one pass (verified clip lengthens).
+- **Studio integration** — `studio_pipeline._process` now: shots → track →
+  build_bundle → `plan_edit` (EditPlan) → analytics → per-shot-zoom crop →
+  single-pass graphics+reframe → multi-beat slow-mo + typography. The Director
+  may **drop a clip** it judges a non-highlight (`director.allow_curation`,
+  status `skipped`). New `director.*` config (base_url/use_asr/allow_curation/…).
+
+Default `director.backend: heuristic` keeps the studio fully offline and
+behaviour-identical until a VLM endpoint is configured. Still ○ (GPU + real
+match): the VLM's actual editorial quality, ASR accuracy, and the P2 critic loop.
+
+
+---
+
+## Appendix — P2 status (review loop implemented & CPU-verified; critic ○ GPU)
+
+The "watch the output and fix it" loop is implemented and wired:
+
+- **Deterministic QA** — `src/qa/checks.py` `qa_report()` inspects the rendered
+  mp4: streams/resolution, black-bar/letterbox detection, dead/frozen frames,
+  integrated loudness (ffmpeg `ebur128` vs target), duration window. Returns a
+  machine-readable `QAReport` (per-check score + issue tags + pass/fail).
+  `tests/test_qa.py` verifies clean passes and that pillarbox/black/over-length
+  clips are flagged.
+- **Critic agent** — `src/agents/critic.py` `critique()` samples OUTPUT
+  keyframes and asks the vision-LLM for a score + issue tags + concrete
+  suggestions (reduce_zoom/widen/trim_slowmo/drop_shots). No-op pass when no
+  model is configured (trusts QA). Reply coercion unit-tested.
+- **Review loop** — `src/agents/review.py`: `apply_corrections()` maps QA+Critic
+  issues to deterministic EditPlan edits (relax zoom on crop-jump, letterbox->
+  crop, trim slow-mo when too long, drop rejected shots); `review_and_revise()`
+  renders -> judges -> corrects -> re-renders up to `qa.max_revisions`, keeping
+  the best result. Both unit-tested with fakes (verified the loop revises
+  zoom 2.0 until QA passes).
+- **Studio integration** — `studio_pipeline._process` now renders the plan
+  through `review_and_revise` (render closure rebuilds the crop per revision),
+  records `qa_score`/`qa_issues`/`revisions` on the clip, and `os.replace`s the
+  best render into the final path. New `qa.*` config block; default
+  `max_revisions: 1`, critic auto-enabled only when a vision endpoint is set.
+
+Still ○ (GPU + real match): the Critic's actual visual judgement and the
+end-to-end multi-revision quality on real footage. P3 (action spotting,
+cross-shot Re-ID, music beat-sync) remains.
+
+
+---
+
+## Appendix — P3 status (smarter perception; deterministic backends CPU-verified)
+
+P3 upgrades perception with lightweight, dependency-free backends (numpy +
+ffmpeg) that are CPU-unit-tested; the heavy models (PANNs / OSNet / librosa)
+are optional drop-in upgrades guarded behind the same interfaces.
+
+- **Audio-event cue** — `src/perception/audio_events.py` `analyze_audio()`
+  decodes the audio (ffmpeg PCM) and builds a 0..1 excitement curve + `roar` /
+  `spike` events via a robust-z RMS detector (optional PANNs hook). Wired into
+  the `PerceptionBundle` (`audio_curve`/`audio_events`) and surfaced in the
+  Director's prompt ("crowd roar at Ns — likely the decisive beat").
+  `tests/test_audio_events.py` (roar burst detected; quiet clip clean).
+- **Cross-shot hero Re-ID** — `src/vision/reid.py`: torso colour-histogram
+  embeddings (optional OSNet), `cross_shot_hero_map()` links the hero's track id
+  across cuts even when BoT-SORT renumbers him, and `per_frame_hero()` feeds the
+  Cameraman a per-frame hero id (new `build_plan(hero_ids=)` /
+  `_focus_points` per-frame support) so the camera follows the SAME player
+  through shots. `tests/test_reid.py` (embedding separation, linking, per-frame
+  follow).
+- **Music beat-sync** — `src/edit/music.py` `detect_beats()` (numpy onset-peak
+  detector, optional librosa) + `snap_to_beats()` + `beat_align_plan()` snap the
+  slow-mo onset / cut-in onto the musical beat. `tests/test_music.py` (recovers
+  ~120 BPM from a click track; snapping; plan alignment).
+- **Studio integration** — `_process` now: optional beat-sync of the plan,
+  cross-shot Re-ID -> per-frame hero ids into the crop, and the audio-event
+  context for the Director. New config: `audio_events.*`, `reid.*`,
+  `edit.audio.beat_sync`. All gated; defaults keep behaviour offline-safe.
+
+Still ○ (GPU + real match): PANNs/OSNet quality vs the deterministic baselines,
+and end-to-end behaviour on real footage. With P0–P3 the studio is now an
+agentic, frame-aware, self-reviewing pipeline rather than fixed presets.
