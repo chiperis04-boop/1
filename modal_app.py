@@ -135,8 +135,14 @@ vllm_image = (
     )
     .env({"HF_HOME": f"{REMOTE}/models/cache/hf",
           "HF_HUB_CACHE": f"{REMOTE}/models/cache/hf/hub",
-          "HF_HUB_ENABLE_HF_TRANSFER": "1",
-          "VLLM_DO_NOT_TRACK": "1"})
+          # hf_transfer isn't reliably present in the image; use the standard
+          # (slightly slower but dependency-free) downloader to avoid a hard fail.
+          "HF_HUB_ENABLE_HF_TRANSFER": "0",
+          "VLLM_DO_NOT_TRACK": "1",
+          # baked into the vLLM image (only built when enabled) so the RUNTIME
+          # guard inside the Modal container sees the flag — a local-only env var
+          # is NOT propagated into containers, which made setup_vlm/vlm no-op.
+          "FHS_ENABLE_VLM": "1"})
 )
 # When VLM serving is disabled (the default), bind setup_vlm/vlm to the light
 # base image so Modal never builds the heavy CUDA vLLM image for a plain render
@@ -189,7 +195,10 @@ def vlm():
         "--served-model-name", VLM_SERVED_NAME,
         "--host", "0.0.0.0", "--port", "8000",
         "--max-model-len", "16384",
-        "--limit-mm-per-prompt", '{"image": 8}',
+        # vLLM 0.7.3 wants the KEY=VALUE form (image=8); the JSON form
+        # '{"image": 8}' is rejected ("Each item should be in the form KEY=VALUE")
+        # and crashed the server on startup.
+        "--limit-mm-per-prompt", "image=8",
         "--gpu-memory-utilization", "0.90",
         "--trust-remote-code",
     ]
