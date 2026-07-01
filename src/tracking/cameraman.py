@@ -262,6 +262,11 @@ class Cameraman:
             from ..perception.shots import frame_segments
             segments = frame_segments(shots, n)
 
+        # anticipation: lead the focus point ahead of the ball along its velocity
+        # so the camera leads the play instead of chasing it (per-shot, so the
+        # lead never bleeds across a cut).
+        focus = _apply_lead(focus, frames, fps, w, h, rf, segments)
+
         # per-frame crop size from the Director's per-shot zoom/framing
         cw_arr = np.full(n, float(crop_w))
         ch_arr = np.full(n, float(crop_h))
@@ -279,6 +284,16 @@ class Cameraman:
         # Kalman-smoothed camera path (constant-velocity); EMA fallback
         cx, cy = _kalman_smooth(focus[:, 0], focus[:, 1],
                                 fps=fps, cfg=self.t, segments=segments)
+        # Hard anti-jerk limits on pan speed + zoom rate (per shot, so a cut can
+        # still jump). Applied after smoothing so a noisy focus can't fling the
+        # crop faster than a real camera operator would move it.
+        cx = _limit_rate(cx, float(rf.get("max_pan_frac_per_s", 0.6)) * w, fps,
+                         segments)
+        cy = _limit_rate(cy, float(rf.get("max_pan_frac_per_s", 0.6)) * h, fps,
+                         segments)
+        zr = float(rf.get("max_zoom_rate_per_s", 0.5))
+        cw_arr = _limit_rate(cw_arr, zr * w, fps, segments)
+        ch_arr = _limit_rate(ch_arr, zr * h, fps, segments)
         cx = np.clip(cx, cw_arr / 2.0, w - cw_arr / 2.0)
         cy = np.clip(cy, ch_arr / 2.0, h - ch_arr / 2.0)
 
@@ -382,6 +397,69 @@ def plan_vertical_crop(clip_path: str, cfg: dict,
 # --------------------------------------------------------------------------- #
 # geometry helpers
 # --------------------------------------------------------------------------- #
+def _ball_track(frames, w, h) -> np.ndarray:
+    """Per-frame ball position with last-known hold (frame centre until first
+    sighting). Used to estimate ball velocity for camera anticipation."""
+    pts = np.empty((len(frames), 2), dtype=np.float64)
+    last = np.array([w / 2.0, h / 2.0])
+    for i, ft in enumerate(frames):
+        ball = getattr(ft, "ball", None)
+        if ball:
+            last = np.asarray(ball["center"], dtype=np.float64)
+        pts[i] = last
+    return pts
+
+
+def _apply_lead(focus: np.ndarray, frames, fps: float, w: int, h: int,
+                rf: dict, segments) -> np.ndarray:
+    """Shift each focus point AHEAD of the ball along its velocity so the camera
+    anticipates the play. lead = lead_gain * ball_velocity(px/s), clamped to
+    lead_max_frac of the frame size. Velocity is a finite difference computed
+    INSIDE each shot segment (never across a cut). No-op when lead_gain<=0.
+    """
+    gain = float(rf.get("lead_gain", 0.0))
+    if gain <= 0 or len(focus) == 0:
+        return focus
+    max_off = float(rf.get("lead_max_frac", 0.18)) * np.array([w, h])
+    ball = _ball_track(frames, w, h)
+    segs = segments if segments else [(0, len(focus))]
+    out = focus.copy()
+    for a, b in segs:
+        a = max(0, min(a, len(focus)))
+        b = max(a, min(b, len(focus)))
+        if b - a < 2:
+            continue
+        # central-difference velocity in px/frame -> px/s, then lead by `gain`
+        # seconds of travel; clamp so a jittery detection can't fling the crop.
+        vel = np.gradient(ball[a:b], axis=0) * float(fps)
+        lead = np.clip(gain * vel, -max_off, max_off)
+        out[a:b] = focus[a:b] + lead
+    return out
+
+
+def _limit_rate(x: np.ndarray, max_step_per_s: float, fps: float,
+                segments) -> np.ndarray:
+    """Clamp the frame-to-frame change of `x` to `max_step_per_s`/fps, INSIDE
+    each shot segment (so a broadcast cut can still jump instantly). Keeps pans
+    and zooms within a physically-plausible speed -> no rubber-band jerks."""
+    n = len(x)
+    if n == 0 or max_step_per_s <= 0:
+        return x
+    max_step = max_step_per_s / max(1.0, float(fps))
+    segs = segments if segments else [(0, n)]
+    out = np.asarray(x, dtype=np.float64).copy()
+    for a, b in segs:
+        a = max(0, min(a, n))
+        b = max(a, min(b, n))
+        for i in range(a + 1, b):
+            delta = out[i] - out[i - 1]
+            if delta > max_step:
+                out[i] = out[i - 1] + max_step
+            elif delta < -max_step:
+                out[i] = out[i - 1] - max_step
+    return out
+
+
 def _resolve_classes(names: dict, cfg_classes: dict):
     player_ids, ball_ids = [], []
     for i, n in names.items():

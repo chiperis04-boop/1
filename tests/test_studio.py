@@ -337,6 +337,58 @@ def test_per_shot_zoom_sizes():
     print(f"  ✓ per-shot zoom: crop {base_cw}px -> {tight_cw}px on the punch-in shot")
 
 
+def test_camera_leads_the_ball():
+    """With lead_gain>0 the focus point is pushed AHEAD of the ball along its
+    direction of travel, so the camera anticipates the play."""
+    from src.tracking.cameraman import _apply_lead
+    w, h = 1280, 720
+    # ball moving steadily right at 20 px/frame
+    frames = [_frame(i, [_player(1, 100 + 20 * i, 360)],
+                     ball_xy=(100 + 20 * i, 360)) for i in range(20)]
+    focus = _focus_points(frames, hero_id=1, w=w, h=h)
+    rf = {"lead_gain": 0.25, "lead_max_frac": 0.5}
+    led = _apply_lead(focus, frames, fps=30.0, w=w, h=h, rf=rf, segments=None)
+    # lead pushes x forward (to the right) mid-clip, and never backwards
+    assert led[10][0] > focus[10][0] + 1.0, (led[10][0], focus[10][0])
+    # no-lead is a strict no-op
+    same = _apply_lead(focus, frames, 30.0, w, h, {"lead_gain": 0.0}, None)
+    assert np.allclose(same, focus)
+    print(f"  \u2713 camera lead: focus x {focus[10][0]:.0f} -> {led[10][0]:.0f} "
+          "(anticipates ball)")
+
+
+def test_lead_is_clamped_and_per_shot():
+    """The lead offset is capped at lead_max_frac of the frame, and velocity is
+    computed per shot so it never bleeds across a cut."""
+    from src.tracking.cameraman import _apply_lead
+    w, h = 1280, 720
+    # huge jump between frame 4 and 5 (a cut) — the lead must not explode
+    xs = [100, 120, 140, 160, 180, 900, 905, 910, 915, 920]
+    frames = [_frame(i, [_player(1, x, 360)], ball_xy=(x, 360))
+              for i, x in enumerate(xs)]
+    focus = _focus_points(frames, hero_id=1, w=w, h=h)
+    rf = {"lead_gain": 1.0, "lead_max_frac": 0.1}     # cap = 128 px
+    segs = [(0, 5), (5, 10)]
+    led = _apply_lead(focus, frames, 30.0, w, h, rf, segments=segs)
+    off = np.abs(led - focus)
+    assert off.max() <= 0.1 * w + 1e-6, off.max()      # never exceeds the cap
+    print(f"  \u2713 lead clamp: max offset {off.max():.0f}px <= cap 128px, per-shot")
+
+
+def test_limit_rate_caps_pan_speed():
+    """_limit_rate clamps frame-to-frame motion within a shot but lets a cut
+    jump instantly across a segment boundary."""
+    from src.tracking.cameraman import _limit_rate
+    x = np.array([0.0, 0, 0, 0, 0, 600, 600, 600, 600, 600])  # step at idx 5
+    # within one segment: the 600px step is slewed to <= max_step/frame
+    one = _limit_rate(x, max_step_per_s=30.0, fps=30.0, segments=None)  # 1px/frame
+    assert np.max(np.abs(np.diff(one))) <= 1.0 + 1e-6, np.diff(one)
+    # with a cut at idx 5: the boundary may jump the full amount
+    seg = _limit_rate(x, max_step_per_s=30.0, fps=30.0, segments=[(0, 5), (5, 10)])
+    assert abs(seg[5] - seg[4]) > 100.0, (seg[4], seg[5])
+    print("  \u2713 rate-limit: pan slewed within a shot, free jump at a cut")
+
+
 def test_team_colors():
     ta = TeamAssignment(team_of={7: 0, 9: 1}, colors={0: (255, 0, 0), 1: (0, 0, 255)})
     assert ta.color_for_track(7) == (255, 0, 0)
@@ -393,6 +445,9 @@ def main() -> int:
         test_per_shot_smoothing_resets_at_cut,
         test_focus_points_fallback_chain,
         test_geometric_hero_vote,
+        test_camera_leads_the_ball,
+        test_lead_is_clamped_and_per_shot,
+        test_limit_rate_caps_pan_speed,
         test_possession_runs_and_bridge,
         test_possession_rejects_far_ball,
         test_number_from_description,
